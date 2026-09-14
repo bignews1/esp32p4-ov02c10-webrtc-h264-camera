@@ -1,0 +1,11 @@
+No license has been selected yet.
+
+Before publishing on GitHub, choose a license that matches your intention:
+
+- MIT: simple permissive sharing
+- Apache-2.0: permissive sharing with explicit patent language
+- GPL-3.0: derivatives must remain open source
+- No license: visible source, but no granted reuse rights
+
+Also check the licenses of ESP-IDF, esp_h264, esp_peer, board support packages,
+and any copied third-party code before publishing a complete repository.

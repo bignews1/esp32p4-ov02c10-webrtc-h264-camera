@@ -1,0 +1,2423 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>카메라 LIVE</title>
+<style>
+:root{--bg:#020b14;--panel:#0c1d2e;--panel2:#071421;--bd:#28445f;--txt:#eef7ff;--sub:#85a8c7;--blue:#0d4f8d;--ok:#0e8d65;--red:#d3292f}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--txt);font-family:Arial,"Noto Sans KR",sans-serif}
+body{min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:8px}
+.top{display:grid;grid-template-columns:44px 1fr;gap:8px;align-items:center;margin-bottom:8px}
+.back{height:42px;border:1px solid var(--bd);border-radius:11px;background:#12253a;color:#fff;text-decoration:none;display:flex;align-items:center;justify-content:center;font-size:23px;font-weight:900}
+.title h1{font-size:19px;margin:0}.title small{display:block;color:#72b9e9;font-size:10px;margin-top:2px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:14px;padding:10px;margin-bottom:9px}
+.profiles{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.profile{position:relative;display:flex;align-items:center;justify-content:center;min-height:48px;border:2px solid #35516d;border-radius:11px;background:#15263a;color:#cfe4f7;font-size:13px;font-weight:900;text-align:center;cursor:pointer;padding:4px}
+.profile input{position:absolute;opacity:0;pointer-events:none}
+.profile:has(input:checked){border-color:#4eb9ff;background:var(--blue);color:#fff;box-shadow:0 0 0 1px #4eb9ff44 inset}
+.profile.disabled{opacity:.5;cursor:not-allowed}
+.actions{display:grid;grid-template-columns:1fr 1fr 52px 52px;gap:7px;margin-top:8px}
+button{border:0;border-radius:11px;min-height:47px;color:#fff;font-size:15px;font-weight:900;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}.start{background:var(--ok)}.stop{background:var(--red)}.full{background:#34495e;font-size:20px}
+.state{margin-top:8px;color:#91b3cf;font-size:11px;height:18px;line-height:18px;display:flex;align-items:center;min-width:0;white-space:nowrap;overflow:hidden}
+.state strong{color:#fff;flex:0 0 auto}.stateDetail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{display:inline-block;flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:#607d8b;margin-right:6px;box-shadow:0 0 0 3px #607d8b22}
+.state.ok .dot{background:#18d484;box-shadow:0 0 0 3px #18d48422}.state.err .dot{background:#ff5252}
+.videoCard{padding:10px}.videoWrap{position:relative;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+video{width:100%;height:100%;object-fit:contain;background:#000}.waiting{position:absolute;color:#72a6cf;font-size:13px;pointer-events:none}.videoWrap.live .waiting{display:none}
+.statusline{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px 6px;margin-top:8px;padding:7px 8px;border:1px solid #203951;border-radius:9px;background:var(--panel2);font-size:10px;color:#89a8c4;overflow:hidden;min-width:0;line-height:1}
+.statItem{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0;white-space:nowrap;overflow:hidden}
+.statLabel{color:#89a8c4;overflow:hidden;text-overflow:ellipsis}.statusline b{color:#fff;font-size:11px;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}.statWide{grid-column:span 2}.statView b{color:#72b9e9}
+.foot{text-align:center;color:#47779f;font-size:9px;padding:2px 0 8px}
+.tuneHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.tuneTitle{font-size:14px;font-weight:900}.tuneMode{font-size:10px;color:#9fc0db;padding:4px 7px;border:1px solid #31516d;border-radius:999px;background:#071421}.tuneMode.manual{color:#8ff0c9;border-color:#238b69}.tuneMode.dirty{color:#ffd27a;border-color:#9b6a19}.tuneGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px}.tuneRow{display:grid;grid-template-columns:74px 1fr 50px;gap:8px;align-items:center}.tuneRow label{font-size:11px;color:#c7dfef;font-weight:800}.tuneRow output{text-align:right;font-size:11px;color:#fff;font-variant-numeric:tabular-nums}.tuneRow input[type=range]{width:100%;accent-color:#4eb9ff}.tuneRow select{width:100%;min-height:32px;border:1px solid #35516d;border-radius:8px;background:#071421;color:#eef7ff;font-size:11px;font-weight:800;padding:4px 7px}.tuneRow input:disabled,.tuneRow select:disabled{opacity:.42}.tuneRow output.wide{font-size:10px}.autoCalBox{display:grid;grid-template-columns:minmax(190px,260px) 1fr;gap:8px;align-items:center;margin-top:10px;padding:8px;border:1px solid #294b67;border-radius:10px;background:#081827}.autoCal{min-height:40px;background:#8a5b16;font-size:12px}.autoCalInfo{font-size:10px;color:#9fc0db;line-height:1.4}.autoCalInfo.ok{color:#8ff0c9}.autoCalInfo.err{color:#ff9b9b}.tuneActions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px}.tuneApply{background:#176aa0}.tuneReset{background:#44576a}.tuneHint{margin-top:7px;font-size:9px;color:#6f91ae;line-height:1.45}
+/* [CAM-AUDIO-GAIN-UI-QOS-V2-20260902] */
+.audioCtl{margin-top:8px;padding:9px 10px;border:1px solid #203951;border-radius:10px;background:var(--panel2)}
+.audioCtlHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.audioCtlTitle{font-size:11px;font-weight:900;color:#e8f5ff}
+.audioCtlBadge{font-size:9px;color:#82b7dd;padding:3px 6px;border:1px solid #31516d;border-radius:999px}
+.audioCtlRow{display:grid;grid-template-columns:82px 1fr 48px;gap:8px;align-items:center;margin-top:6px}
+.audioCtlRow label{font-size:10px;color:#bcd5e8;font-weight:800}
+.audioCtlRow input[type=range]{width:100%;accent-color:#4eb9ff}
+.audioCtlRow output{text-align:right;font-size:10px;color:#fff;font-variant-numeric:tabular-nums}
+@media(max-width:600px){.wrap{padding:6px}.tuneGrid{grid-template-columns:1fr}.tuneRow{grid-template-columns:68px 1fr 48px}.title h1{font-size:17px}.profile{font-size:12px}.actions{grid-template-columns:1fr 1fr 44px 44px}.statusline{grid-template-columns:repeat(6,minmax(0,1fr));gap:5px 5px;padding:7px 7px;font-size:9px}.statusline b{font-size:10px}.autoCalBox{grid-template-columns:1fr}.autoCalInfo{text-align:center}}
+
+/* [CAM-WB-UI-V2-20260901]
+ * White balance is visually one control family:
+ * AUTO/MANUAL segmented control + full-width warm/neutral/cool temperature. */
+.wbPanel{
+  grid-column:1/-1;
+  margin-top:2px;
+  padding:9px 11px 10px;
+  border:1px solid rgba(83,132,170,.34);
+  border-radius:10px;
+  background:rgba(8,25,40,.42);
+}
+.wbHead{
+  display:grid;
+  grid-template-columns:124px minmax(210px,300px) 1fr;
+  align-items:center;
+  gap:10px;
+}
+.wbHeading{display:flex;align-items:baseline;gap:7px;white-space:nowrap}
+.wbTitle{font-size:11px;font-weight:900;color:#f4f9ff}
+
+.wbSegment{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  padding:2px;
+  border:1px solid #35516d;
+  border-radius:8px;
+  background:#06131f;
+  overflow:hidden;
+}
+.wbSegBtn{
+  min-height:27px;
+  padding:4px 10px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:#8ea4b9;
+  font-size:10px;
+  font-weight:900;
+  letter-spacing:.25px;
+  cursor:pointer;
+}
+.wbSegBtn:hover:not(:disabled){background:rgba(78,185,255,.08);color:#d9efff}
+.wbSegBtn.active{
+  background:#2575aa;
+  color:#fff;
+  box-shadow:0 0 0 1px rgba(119,207,255,.18) inset;
+}
+.wbSegBtn:disabled{opacity:.42;cursor:default}
+.wbModeGhost{display:none}
+.wbStatus{
+  min-width:0;
+  font-size:9px;
+  font-weight:700;
+  color:#91a7ba;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.wbDot{
+  display:inline-block;
+  width:6px;height:6px;
+  margin-right:5px;
+  border-radius:50%;
+  background:#38d58b;
+  vertical-align:1px;
+  box-shadow:0 0 7px rgba(56,213,139,.35);
+}
+.wbTempWrap{
+  margin-top:8px;
+  padding-top:8px;
+  border-top:1px solid rgba(82,119,151,.28);
+  max-height:92px;
+  opacity:1;
+  overflow:hidden;
+  transform:translateY(0);
+  transition:max-height .18s ease,opacity .15s ease,margin-top .18s ease,padding-top .18s ease,transform .18s ease,border-color .18s ease;
+}
+.wbTempWrap.disabled{opacity:.38}
+.wbTempWrap.collapsed{
+  max-height:0;
+  opacity:0;
+  margin-top:0;
+  padding-top:0;
+  border-top-color:transparent;
+  transform:translateY(-3px);
+  pointer-events:none;
+}
+.wbTempTop{
+  display:grid;
+  grid-template-columns:124px 1fr;
+  align-items:center;
+  margin-bottom:4px;
+}
+.wbTempTop label{font-size:10px;font-weight:800;color:#d9e8f5}
+.wbTempTop output{
+  justify-self:end;
+  min-width:52px;
+  text-align:right;
+  font-size:10px;
+  font-weight:900;
+  color:#eef8ff;
+}
+.wbTempControl{
+  display:grid;
+  grid-template-columns:58px 1fr 58px;
+  align-items:center;
+  gap:8px;
+}
+.wbWarm,.wbCool{
+  font-size:9px;
+  font-weight:800;
+  color:#9aabba;
+  white-space:nowrap;
+}
+.wbWarm{text-align:left}
+.wbCool{text-align:right}
+.wbTempSlider{
+  width:100%;
+  height:6px;
+  margin:0;
+  -webkit-appearance:none;
+  appearance:none;
+  border-radius:999px;
+  outline:none;
+  background:linear-gradient(90deg,#f0a35d 0%,#ffd5a8 24%,#f5f5ed 57%,#c9e6ff 76%,#659ee4 100%);
+}
+.wbTempSlider::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width:15px;height:15px;
+  border-radius:50%;
+  border:2px solid #eaf7ff;
+  background:#4eb9ff;
+  box-shadow:0 1px 5px rgba(0,0,0,.45);
+  cursor:pointer;
+}
+.wbTempSlider::-moz-range-thumb{
+  width:13px;height:13px;
+  border-radius:50%;
+  border:2px solid #eaf7ff;
+  background:#4eb9ff;
+  box-shadow:0 1px 5px rgba(0,0,0,.45);
+  cursor:pointer;
+}
+.wbTempSlider:disabled::-webkit-slider-thumb{cursor:default}
+.wbScale{
+  display:grid;
+  grid-template-columns:58px 1fr 58px;
+  gap:8px;
+  margin-top:3px;
+  font-size:8px;
+  font-weight:700;
+  color:#5f768b;
+}
+.wbScale span:nth-child(1){text-align:left}
+.wbScale span:nth-child(3){text-align:right}
+.wbScale .wbNeutral{text-align:center;color:#718da6}
+@media(max-width:720px){
+  .wbHead{grid-template-columns:1fr minmax(180px,1.2fr)}
+  .wbStatus{grid-column:1/-1;margin-top:-2px}
+  .wbTempControl,.wbScale{grid-template-columns:48px 1fr 48px}
+  .wbTempTop{grid-template-columns:1fr auto}
+}
+
+/* [CAM-WEB-UNMIRROR-DISPLAY-V2-20260902]
+ * Browser display only: horizontal correction.
+ * Sensor / Bayer / ISP / H264 / WebRTC signaling are untouched. */
+video{
+  transform:scaleX(-1);
+  transform-origin:center center;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/" aria-label="메인으로">←</a>
+    <div class="title">
+      <h1>📷 카메라 LIVE</h1>
+      <small>OV02C10 · WebRTC · H.264 + Opus 24kHz mono · QP30..40 auto-RC · 최대 2명 · FULL ICE + STUN P2P + TURN/TLS 443</small>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="profiles">
+      <label class="profile"><input type="radio" name="profile" value="1080p" checked><span>1080p<br>1920×1080 · 30fps</span></label>
+      <label class="profile"><input type="radio" name="profile" value="720p-highspeed"><span>720p60<br>1288×728 · 60fps</span></label>
+    </div>
+    <div class="actions">
+      <button id="btnStart" class="start">▶ 시작</button>
+      <button id="btnStop" class="stop" disabled>■ 정지</button>
+      <button id="btnAudio" class="full" title="웹캠 소리 켜기/끄기">🔊</button>
+      <button id="btnFull" class="full" title="전체 화면">⛶</button>
+    </div>
+    <div id="state" class="state"><span class="dot"></span><strong>대기</strong><span class="stateDetail">&nbsp;프로파일을 선택하고 시작하세요.</span></div>
+    <div class="audioCtl">
+      <div class="audioCtlHead">
+        <div class="audioCtlTitle">🎙 오디오</div>
+        <div class="audioCtlBadge">24kHz mono · clean RX</div>
+      </div>
+      <div class="audioCtlRow">
+        <label for="micGain">마이크 HW 감도</label>
+        <input id="micGain" type="range" min="0" max="42" step="6" value="18">
+        <output id="micGainV">+18 dB</output>
+      </div>
+      <div class="audioCtlRow">
+        <label for="webVol">웹 재생 음량</label>
+        <input id="webVol" type="range" min="0" max="100" step="1" value="100">
+        <output id="webVolV">100%</output>
+      </div>
+    </div>
+  </div>
+
+  <div class="card videoCard">
+    <div id="videoWrap" class="videoWrap">
+      <video id="video" autoplay playsinline muted></video>
+      <audio id="remoteAudio" autoplay playsinline></audio>
+      <div class="waiting">영상 대기 중</div>
+    </div>
+    <div class="statusline">
+      <div class="statItem"><span class="statLabel">MODE</span><b id="stProfile">-</b></div>
+      <div class="statItem"><span class="statLabel">QP</span><b id="stQp">-</b></div>
+      <div class="statItem"><span class="statLabel">GOP</span><b id="stGop">-</b></div>
+      <div class="statItem"><span class="statLabel">RX</span><b id="stRx">-</b></div>
+      <div class="statItem"><span class="statLabel">CAP</span><b id="stCapture">-</b></div>
+      <div class="statItem"><span class="statLabel">ENC</span><b id="stEncode">-</b></div>
+      <div class="statItem"><span class="statLabel">DROP</span><b id="stDrop">0</b></div>
+      <div class="statItem"><span class="statLabel">DMA</span><b id="stDma">-</b></div>
+      <div class="statItem"><span class="statLabel">ICE</span><b id="stIce">-</b></div>
+      <div class="statItem"><span class="statLabel">AUD</span><b id="stAudio">ON</b></div>
+      <div class="statItem statView statWide"><span class="statLabel">VIEW</span><b id="stViewers">0/2</b></div>
+    </div>
+  </div>
+
+  <div class="card" id="tuneCard">
+    <div class="tuneHead">
+      <div class="tuneTitle">🎛 카메라 화질 설정</div>
+      <div id="tuneMode" class="tuneMode">기본 화질</div>
+    </div>
+    <div id="tuneProfileInfo" class="tuneHint" style="margin:0 0 8px">1080p 전용 설정 · 이 프로파일만 NVS에 저장합니다.</div>
+    <div class="tuneGrid">
+      <div class="tuneRow"><label for="sat">채도</label><input id="sat" type="range" min="64" max="224" step="1" value="136"><output id="satV">136</output></div>
+      <div class="tuneRow"><label for="gamma">감마</label><input id="gamma" type="range" min="350" max="1000" step="1" value="518"><output id="gammaV">0.518</output></div>
+      <div class="tuneRow"><label for="sharp">선명도</label><input id="sharp" type="range" min="0" max="200" step="1" value="100"><output id="sharpV">100%</output></div>
+      <div class="tuneRow"><label for="contrast">콘트라스트</label><input id="contrast" type="range" min="80" max="180" step="1" value="130"><output id="contrastV">130</output></div>
+      <div class="tuneRow"><label for="hue">색조</label><input id="hue" type="range" min="-128" max="127" step="1" value="0"><output id="hueV">0</output></div>
+      <!-- [CAM-WB-UI-V2-20260901] presentation-only WB redesign -->
+      <div class="wbPanel">
+        <input id="wbMode" type="hidden" value="auto">
+        <output id="wbModeV" class="wbModeGhost" aria-live="polite">AUTO</output>
+
+        <div class="wbHead">
+          <div class="wbHeading">
+            <span class="wbTitle">화이트밸런스</span>
+          </div>
+          <div class="wbSegment" role="group" aria-label="화이트밸런스 모드">
+            <button id="wbAuto" class="wbSegBtn active" type="button" aria-pressed="true">AUTO</button>
+            <button id="wbManual" class="wbSegBtn" type="button" aria-pressed="false">MANUAL</button>
+          </div>
+          <div id="wbStatus" class="wbStatus"><span class="wbDot"></span>자동 화이트밸런스 · ISP/IPA 자동 보정</div>
+        </div>
+
+        <div id="wbTempWrap" class="wbTempWrap disabled collapsed">
+          <div class="wbTempTop">
+            <label for="wbTemp">색온도 보정</label>
+            <output id="wbTempV">6500K</output>
+          </div>
+          <div class="wbTempControl">
+            <span class="wbWarm">따뜻하게</span>
+            <input id="wbTemp" class="wbTempSlider" type="range" min="3000" max="9000" step="100" value="6500" disabled>
+            <span class="wbCool">차갑게</span>
+          </div>
+          <div class="wbScale" aria-hidden="true">
+            <span>3000K</span>
+            <span class="wbNeutral">6500K · 중립</span>
+            <span>9000K</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="autoCalBox">
+      <button id="btnAutoCal" class="autoCal" type="button">🎯 720 색상 자동보정</button>
+      <div id="autoCalInfo" class="autoCalInfo">1080 중앙 영역을 기준으로 720을 자동보정합니다. 채도 범위는 64~224를 유지하고, 마지막에 Hue×WB×채도 3D 미세탐색으로 U/V 중심과 Cabs를 함께 맞춥니다. 720 콘트라스트는 최대 255까지 시험하며 중간 후보는 RAM-only입니다.</div>
+    </div>
+    <div class="tuneActions">
+      <button id="btnTuneApply" class="tuneApply">사용자 설정 저장</button>
+      <button id="btnTuneReset" class="tuneReset">기본 화질로 복귀</button>
+    </div>
+    <div class="tuneHint">1080p와 720p60의 화질 값은 서로 독립입니다. 콘트라스트는 1080=80~220, 720=80~255이며 채도는 둘 다 64~224입니다. 「720 색상 자동보정」은 1080을 읽기 기준으로만 사용하고 720만 보정합니다. 중간 후보는 RAM 미리보기이며 NVS는 최종 검증 통과 단계에서만 저장합니다.</div>
+  </div>
+  <div class="foot">실사용 production 화면 · Browser offer / ESP FULL ICE · STUN direct + TURN/TLS 443 fallback · 최대 2명 · 사용자 화질 설정 · NVS 저장</div>
+</div>
+
+<script>
+const API={offer:'/api/smoke/offer',answer:'/api/smoke/answer',stop:'/api/smoke/stop',status:'/api/smoke/status',isp:'/api/smoke/isp',color2:'/api/cam/color2'};
+const $=id=>document.getElementById(id);
+let pc=null,running=false,statsTimer=null,sessionId=0;
+/* [CAM-STARTUP-15FPS-RECOVERY-AB1-20260907]
+ * One clean fresh-PC retry per manual Start when ESP camera capture is stuck
+ * below 20 fps with sustained DQBUF wait. Network/ICE policy is otherwise
+ * untouched; the camera-specific retry always starts fresh ALL. */
+let netCam15RecoveryUsed=false;
+/* [CAM-INITIAL-START-RECOVERY-V2-TOKEN-20260903]
+ * Per-page 128-bit token. It identifies ONLY this browser page while it is
+ * alive; it is not persisted and is not a user/device identifier.
+ * ESP binds it to the session created from this page's /offer so a lost HTTP
+ * answer can be cleaned up without ever using anonymous /stop. */
+const CAM_CLIENT_TOKEN=(()=>{
+  try{
+    const b=new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+  }catch(_){
+    let s='';
+    for(let i=0;i<32;i++)s+=(Math.random()*16|0).toString(16);
+    return s;
+  }
+})();
+let audioEnabled=true; /* [CAM-AUDIO-OPUS24K-V4-20260902] */
+let webVolume=Math.max(0,Math.min(100,Number(localStorage.getItem('camWebVol')||100))); /* [CAM-AUDIO-GAIN-UI-QOS-V2-20260902] */
+let micGainDb=18; /* [CAM-AUDIO-NEUTRAL-GAIN-V2-20260902] */
+let micGainTimer=null;
+
+/* [WEBRTC-FINAL-CANDIDATE-FC1-20260908]
+ * Browser diagnostic telemetry removed; operational recovery/profile-switch logic retained. */
+
+/* [CAM-NET-HANDOVER-RECOVERY-20260901]
+ *
+ * Browser network handover recovery for Wi-Fi <-> LTE.
+ *
+ * Observed hardware/browser failure:
+ *   - old Wi-Fi candidate traffic can continue after the browser has created
+ *     a new LTE SDP-only offer;
+ *   - the ESP ICE agent then sees packets from an address that is not part of
+ *     the new SDP and the session can remain checking / fail.
+ *
+ * Policy:
+ *   1. "disconnected" gets a 1.2 s grace period (brief RF wobble is ignored).
+ *   2. If still unhealthy, close the old browser PC FIRST.
+ *   3. Wait until the same-origin HTTP path is reachable on the new network.
+ *   4. POST /stop for the captured old sid.
+ *   5. Create a completely NEW RTCPeerConnection / offer (no restartIce).
+ *   6. If a fresh normal ALL-policy attempt fails, retry ONCE with
+ *      iceTransportPolicy='relay' to force the proven TURN/TLS443 path.
+ *
+ * No camera / ISP / H264 / ESP ICE / TURN server behavior is changed.
+ */
+let netRecoverTimer=null;
+let netConnectWatchdog=null;
+let netFirstFrameTimer=null; /* [CAM-MEDIA-FIRST-FRAME-GUARD-V3-EXACT-20260903] */
+let netFirstFramePc=null;
+let netRecovering=false;
+let netRecoveryEpoch=0;
+let netForceRelayForNextStart=false;
+let netManualStop=false;
+let netFirstUnhealthyAt=0; /* [CAM-NET-FAILED-IMMEDIATE-ANCHOR-V2-20260902] fixed grace deadline anchor */
+
+const NET_DISCONNECT_GRACE_MS=800;
+const NET_FAILED_GRACE_MS=0; /* [CAM-NET-FAILED-IMMEDIATE-ANCHOR-V2-20260902] failed is treated as terminal without ICE restart */
+/* [CAM-NET-FAST-HANDOVER-V2-20260901]
+ * Faster production handover:
+ *   disconnected -> 0.8 s fixed-deadline grace
+ *   failed       -> immediate fresh-PC recovery
+ *   old sid /stop itself is the new-network reachability probe.
+ * Browser FPS2S logic remains unchanged. */
+const NET_CONNECT_WATCHDOG_MS=6500;
+const NET_REACHABLE_MAX_MS=4000;
+const NET_RELAY_CONNECT_MS=8000;
+const NET_FIRST_FRAME_TIMEOUT_MS=6500; /* [CAM-MEDIA-FIRST-FRAME-GUARD-V3-EXACT-20260903] connected transport but no decoded video */
+const INITIAL_START_RETRY_DELAY_MS=1000; /* [CAM-INITIAL-START-RECOVERY-V2-TOKEN-20260903] one initial retry only */
+
+/* [WEBRTC-FINAL-CANDIDATE-FC1-FIX2-20260909]
+ * Operational helpers retained after diagnostic cleanup.
+ * netSleep is used by recovery/profile-switch polling.
+ * browserFpsReset/browserFpsFromInbound are used by recovery state handling and LIVE UI. */
+function netSleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+/* Browser FPS is derived from framesDecoded deltas instead of the optional
+ * framesPerSecond field. This survives ICE path handover much more reliably.
+ * With the existing 1200 ms stats cadence the effective window is ~2.4 s. */
+let browserFpsPc=null;
+let browserFpsSamples=[];
+let browserFpsValue=null;
+const BROWSER_FPS_MIN_WINDOW_MS=1800;
+const BROWSER_FPS_MAX_WINDOW_MS=3500;
+
+function browserFpsReset(p=null){
+  browserFpsPc=p;
+  browserFpsSamples=[];
+  browserFpsValue=null;
+}
+function browserFpsFromInbound(p,inbound){
+  if(!p||!inbound)return null;
+  if(browserFpsPc!==p)browserFpsReset(p);
+
+  const frames=Number(inbound.framesDecoded);
+  const statTs=Number(inbound.timestamp);
+  const ts=Number.isFinite(statTs)?statTs:performance.now();
+  if(!Number.isFinite(frames)||frames<0||!Number.isFinite(ts))return browserFpsValue;
+
+  const last=browserFpsSamples.length?browserFpsSamples[browserFpsSamples.length-1]:null;
+  if(last&&(frames<last.frames||ts<=last.ts)){
+    browserFpsReset(p);
+  }
+
+  browserFpsSamples.push({ts:ts,frames:frames});
+
+  /* Keep enough history for a stable ~2 s rolling delta, but never let
+   * a long network outage contaminate the next displayed FPS. */
+  while(browserFpsSamples.length>1 &&
+        (ts-browserFpsSamples[0].ts)>BROWSER_FPS_MAX_WINDOW_MS){
+    browserFpsSamples.shift();
+  }
+
+  let base=null;
+  for(const s of browserFpsSamples){
+    if((ts-s.ts)>=BROWSER_FPS_MIN_WINDOW_MS){base=s;break;}
+  }
+
+  if(base&&frames>=base.frames){
+    const dt=ts-base.ts;
+    const fps=(frames-base.frames)*1000/dt;
+    if(Number.isFinite(fps)&&fps>=0&&fps<=240)browserFpsValue=fps;
+  }
+  return browserFpsValue;
+}
+let browserRxPc=null;
+let browserRxPrev=null;
+let browserRxKbps=0;
+function browserRxReset(p=null){
+  browserRxPc=p;
+  browserRxPrev=null;
+  browserRxKbps=0;
+}
+function browserRxFromInbound(p,inbound){
+  if(!p||!inbound)return browserRxKbps;
+  if(browserRxPc!==p)browserRxReset(p);
+  const bytes=Number(inbound.bytesReceived);
+  const statTs=Number(inbound.timestamp);
+  const ts=Number.isFinite(statTs)?statTs:performance.now();
+  if(!Number.isFinite(bytes)||bytes<0||!Number.isFinite(ts))return browserRxKbps;
+  if(browserRxPrev&&bytes>=browserRxPrev.bytes&&ts>browserRxPrev.ts){
+    const dt=ts-browserRxPrev.ts;
+    if(dt>=400&&dt<=5000){
+      browserRxKbps=Math.max(0,Math.min(1000000,Math.round((bytes-browserRxPrev.bytes)*8/dt)));
+    }
+  }
+  browserRxPrev={ts:ts,bytes:bytes};
+  return browserRxKbps;
+}
+
+/* [CAM-HANDOVER-PATH-AWARE-AB3-20260907]
+ * TEST ONLY. Classify the actually selected candidate pair from the old PC
+ * before PC-FIRST cleanup. Previous DIRECT => first fresh recovery is dual
+ * RELAY (browser relay + esp_relay_only:true). Previous RELAY => first fresh
+ * recovery is ALL on both sides so a newly available direct path can win.
+ * Unknown classification fails safe to ALL. No network-name guessing. */
+function netAb3PairWasRelay(p,rep,pair){
+  if(!p||!rep||!pair)return null;
+  let lc=null,rc=null;
+  if(pair.localCandidateId&&rep.get)lc=rep.get(pair.localCandidateId)||null;
+  if(pair.remoteCandidateId&&rep.get)rc=rep.get(pair.remoteCandidateId)||null;
+  const lt=String((lc&&lc.candidateType)||'').toLowerCase();
+  const rt=String((rc&&rc.candidateType)||'').toLowerCase();
+  if(!lt&&!rt)return null;
+  return lt==='relay'||rt==='relay';
+}
+function netAb3RememberSelectedPath(p,rep,pair){
+  if(!p)return;
+  /* [CAM-HANDOVER-PATH-AWARE-AB3-CONNECTED-GATE-FIX2-20260907]
+   * Only a PC that actually reached connectionState=connected is allowed to
+   * become path history for the NEXT recovery.  A selected ICE pair alone is
+   * not enough: the observed first-Start failure selected LAN DIRECT but DTLS
+   * failed before connected, and treating that as DIRECT wrongly forced the
+   * next fresh PC to RELAY. */
+  if(p._ab3EverConnected!==true)return;
+  /* FIX1 remains authoritative for a successfully connected relay-only PC:
+   * candidate objects may disappear after network loss, but the policy itself
+   * proves that a connected relay-only PC could only have used RELAY. */
+  if(p._ab3PolicyRelayOnly===true){p._ab3SelectedWasRelay=true;return;}
+  const v=netAb3PairWasRelay(p,rep,pair);
+  if(typeof v==='boolean')p._ab3SelectedWasRelay=v;
+}
+async function netAb3PreviousWasRelay(p){
+  /* Never classify an attempt that died before WebRTC connectionState=connected.
+   * Unknown => existing AB3 safe fallback ALL. */
+  if(!p||p._ab3EverConnected!==true)return null;
+  const remembered=(p._ab3PolicyRelayOnly===true)?true:
+    ((typeof p._ab3SelectedWasRelay==='boolean')?p._ab3SelectedWasRelay:null);
+  try{
+    const rep=await p.getStats();
+    let tr=null,pair=null;
+    rep.forEach(x=>{if(!tr&&x.type==='transport')tr=x;});
+    if(tr&&tr.selectedCandidatePairId&&rep.get)pair=rep.get(tr.selectedCandidatePairId)||null;
+    if(!pair)rep.forEach(x=>{if(!pair&&x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded')pair=x;});
+    const v=netAb3PairWasRelay(p,rep,pair);
+    if(typeof v==='boolean'){p._ab3SelectedWasRelay=v;return v;}
+  }catch(_){}
+  return remembered;
+}
+
+function netClearRecoverTimer(){
+  if(netRecoverTimer){clearTimeout(netRecoverTimer);netRecoverTimer=null;}
+}
+function netClearConnectWatchdog(){
+  if(netConnectWatchdog){clearTimeout(netConnectWatchdog);netConnectWatchdog=null;}
+}
+function netClearFirstFrameWatchdog(){
+  if(netFirstFrameTimer){clearTimeout(netFirstFrameTimer);netFirstFrameTimer=null;}
+  netFirstFramePc=null;
+}
+/* [CAM-MEDIA-FIRST-FRAME-GUARD-V3-EXACT-20260903]
+ * Transport connected is not media proof. Accept success only after THIS
+ * PeerConnection has actually decoded at least one inbound video frame. */
+async function netHasDecodedVideo(p){
+  if(!p||pc!==p)return false;
+  try{
+    const rep=await p.getStats();
+    let frames=0;
+    rep.forEach(x=>{
+      if(x.type==='inbound-rtp'&&(x.kind==='video'||x.mediaType==='video')){
+        const n=Number(x.framesDecoded);
+        if(Number.isFinite(n)&&n>frames)frames=n;
+      }
+    });
+    return frames>0;
+  }catch(_){
+    return false;
+  }
+}
+function netArmFirstFrameWatchdog(p){
+  if(!p||pc!==p)return;
+  if(netFirstFrameTimer&&netFirstFramePc===p)return;
+
+  netClearFirstFrameWatchdog();
+  netFirstFramePc=p;
+  netFirstFrameTimer=setTimeout(async()=>{
+    netFirstFrameTimer=null;
+    const watched=netFirstFramePc;
+    netFirstFramePc=null;
+
+    if(netRecovering||netManualStop||!watched||pc!==watched)return;
+    if(!netHealthy(watched))return;
+    if(await netHasDecodedVideo(watched))return;
+    if(netRecovering||netManualStop||pc!==watched)return; /* stale after await */
+
+    browserFpsReset(watched);
+    setState('','영상 복구','연결은 됐지만 첫 영상이 없어 완전 새 연결을 만듭니다.');
+    netRecoverNetwork('media-start-timeout').catch(e=>{
+      netRecovering=false;
+      setRunning(false);
+      setTuneDisabled(false);
+      setState('err','연결 오류','첫 영상 자동복구 실패 · '+(e&&e.message?e.message:String(e)));
+    });
+  },NET_FIRST_FRAME_TIMEOUT_MS);
+}
+function netHealthy(p){
+  if(!p)return false;
+  const c=p.connectionState;
+  const i=p.iceConnectionState;
+  return c==='connected'&&(i==='connected'||i==='completed');
+}
+function netRecoveryCancel(){
+  netRecoveryEpoch++;
+  netClearRecoverTimer();
+  netClearConnectWatchdog();
+  netClearFirstFrameWatchdog();
+  netRecovering=false;
+  netForceRelayForNextStart=false;
+}
+function netRecoveryUiLock(){
+  try{
+    $('btnStart').disabled=true;
+    $('btnStop').disabled=true;
+    setProfileControlsDisabled(true);
+    setTuneDisabled(true);
+  }catch(_){}
+}
+async function netFetchWithTimeout(url,opts={},timeoutMs=1500){
+  const ac=new AbortController();
+  const t=setTimeout(()=>ac.abort(),timeoutMs);
+  try{
+    return await fetch(url,Object.assign({},opts,{signal:ac.signal}));
+  }finally{
+    clearTimeout(t);
+  }
+}
+async function netPostStopSid(sid,timeoutMs=1200){
+  if(!sid)return true;
+  try{
+    /* Any HTTP response proves that the browser has a usable route to ESP.
+     * /stop is idempotent enough for this recovery path and also performs the
+     * required old-session teardown, so a separate /status probe is wasted time. */
+    const r=await netFetchWithTimeout(
+      API.stop+'?sid='+encodeURIComponent(sid),
+      {method:'POST',cache:'no-store',keepalive:true},
+      timeoutMs
+    );
+    return !!r;
+  }catch(_){
+    return false;
+  }
+}
+/* [CAM-INITIAL-START-RECOVERY-V2-TOKEN-20260903]
+ * Safe orphan cleanup when /offer may have created a server session but the
+ * browser never received session_id. The token is unique to this page and ESP
+ * only tears down a session with the exact same token. No anonymous /stop. */
+async function netPostStopToken(timeoutMs=1800){
+  try{
+    const r=await netFetchWithTimeout(
+      API.stop+'?token='+encodeURIComponent(CAM_CLIENT_TOKEN),
+      {method:'POST',cache:'no-store',keepalive:true},
+      timeoutMs
+    );
+    return !!r;
+  }catch(_){
+    return false;
+  }
+}
+async function netStopWhenReachable(sid,epoch,maxMs=NET_REACHABLE_MAX_MS){
+  const end=Date.now()+maxMs;
+
+  /* First attempt immediately. During Wi-Fi<->LTE handover it is common for
+   * the new path to already be usable before browser network events settle. */
+  while(Date.now()<end){
+    if(epoch!==netRecoveryEpoch||netManualStop)return false;
+
+    if(navigator.onLine!==false){
+      const reached=await netPostStopSid(sid,900);
+      if(reached)return true;
+    }
+
+    /* Short retry cadence keeps fallback responsive without hammering ESP. */
+    await netSleep(180);
+  }
+  return false;
+}
+async function netWaitConnected(p,epoch,maxMs){
+  const end=Date.now()+maxMs;
+  while(Date.now()<end){
+    if(epoch!==netRecoveryEpoch||netManualStop)return false;
+    if(!p||pc!==p)return false;
+    if(p.connectionState==='failed'||p.connectionState==='closed')return false;
+    if(netHealthy(p)&&await netHasDecodedVideo(p)){
+      netClearFirstFrameWatchdog();
+      return true;
+    }
+    await netSleep(200);
+  }
+  if(!p||pc!==p||!netHealthy(p))return false;
+  const ready=await netHasDecodedVideo(p);
+  if(ready)netClearFirstFrameWatchdog();
+  return ready;
+}
+function netArmConnectWatchdog(p){
+  netClearConnectWatchdog();
+  netConnectWatchdog=setTimeout(()=>{
+    netConnectWatchdog=null;
+    if(netRecovering||netManualStop||pc!==p||!p)return;
+    if(!netHealthy(p)){
+      netScheduleRecovery('connect-timeout',0);
+    }else{
+      netArmFirstFrameWatchdog(p);
+    }
+  },NET_CONNECT_WATCHDOG_MS);
+}
+function netScheduleRecovery(reason,delayMs){
+  if(netRecovering||netManualStop||(!pc&&!running))return;
+
+  netClearRecoverTimer();
+  const watched=pc;
+  const delay=(delayMs===undefined)?NET_DISCONNECT_GRACE_MS:delayMs;
+
+  if(reason!=='network-change'){
+    /* [CAM-NET-HANDOVER-UI-ONLY-20260901]
+     * Presentation only: during the existing 1.2 s grace period,
+     * show recovery-in-progress instead of a red error. */
+    setState('',
+      delay>0?'망 전환 중':'망 전환 복구',
+      delay>0?'연결 복구 중...':'기존 연결 정리 준비');
+  }
+
+  netRecoverTimer=setTimeout(()=>{
+    netRecoverTimer=null;
+    if(netRecovering||netManualStop||pc!==watched||!watched)return;
+
+    /* If the old path recovered during the grace period, do nothing. */
+    if(netHealthy(watched))return;
+
+    netRecoverNetwork(reason).catch(e=>{
+      netRecovering=false;
+      setRunning(false);
+      setTuneDisabled(false);
+      setState('err','연결 오류','망 전환 자동복구 실패 · '+(e&&e.message?e.message:String(e)));
+    });
+  },delay);
+}
+function netPeerStateChanged(p,source){
+  if(!p||pc!==p||netRecovering||netManualStop)return;
+
+  const cs=p.connectionState;
+  const is=p.iceConnectionState;
+
+  if(netHealthy(p)){
+    /* A healthy connection ends the current unhealthy episode. */
+    netFirstUnhealthyAt=0;
+    netClearRecoverTimer();
+    netClearConnectWatchdog();
+    return;
+  }
+
+  const failed=(cs==='failed'||is==='failed');
+  const disconnected=(cs==='disconnected'||is==='disconnected');
+  if(!failed&&!disconnected)return;
+
+  const now=Date.now();
+  if(!netFirstUnhealthyAt)netFirstUnhealthyAt=now;
+
+  browserFpsReset(p);
+
+  if(failed){
+    /* No trickle / no restartIce in this production path:
+     * failed is treated as terminal and fresh-PC recovery starts immediately. */
+    netScheduleRecovery(source+'-failed',NET_FAILED_GRACE_MS);
+    return;
+  }
+
+  /* Keep the original 0.8 s policy, but measure it from the FIRST unhealthy
+   * event. Repeated ICE/connection callbacks can only consume the remaining
+   * grace; they can never extend the deadline. */
+  const elapsed=Math.max(0,now-netFirstUnhealthyAt);
+  const remaining=Math.max(0,NET_DISCONNECT_GRACE_MS-elapsed);
+  netScheduleRecovery(source+'-disconnected',remaining);
+}
+async function netRecoverNetwork(reason){
+  if(netRecovering||netManualStop)return;
+  netRecovering=true;
+  netFirstUnhealthyAt=0;
+  netClearRecoverTimer();
+  netClearConnectWatchdog();
+  netClearFirstFrameWatchdog();
+
+  const epoch=++netRecoveryEpoch;
+  const oldSid=sessionId;
+  const oldPc=pc;
+  const previousWasRelay=await netAb3PreviousWasRelay(oldPc);
+
+  setState('','망 전환 복구','기존 연결 종료');
+  await cleanup(false);                 // PC-FIRST: stop old RTCP/NACK source
+  if(epoch!==netRecoveryEpoch||netManualStop)return;
+
+  netRecoveryUiLock();
+  setState('','망 전환 복구','새 네트워크 확인 중');
+
+  /* PC-FIRST is already complete above. Now use old sid /stop as BOTH:
+   *   - old ESP session teardown
+   *   - proof that the new browser network path can reach ESP.
+   * Start the fresh PeerConnection immediately on the first response. */
+  const reachable=await netStopWhenReachable(oldSid,epoch);
+  if(epoch!==netRecoveryEpoch||netManualStop)return;
+
+  if(!reachable){
+    /* Do not add another fixed sleep. start() will be the final connectivity
+     * test and the existing TURN fallback remains available if it fails. */
+    setState('','카메라 자동 재연결','네트워크 응답 지연 · 즉시 재협상 시도');
+  }
+
+  /* [CAM-HANDOVER-PATH-AWARE-AB3-20260907]
+   * TEST ONLY. Use the ACTUAL previous selected pair, never Wi-Fi/LTE labels:
+   *   previous DIRECT -> dual RELAY first (bypass ESP relay defer)
+   *   previous RELAY  -> ALL first (allow direct path to win after return)
+   *   unknown         -> ALL first (safe fallback)
+   * A/B2 server support remains unchanged: esp_relay_only selects ESP RELAY. */
+  const relayFirst=(reason==='camera-startup-15fps')?false:(previousWasRelay===false);
+  if(reason==='camera-startup-15fps'){
+    try{console.info('[CAM-STARTUP-15FPS-RECOVERY-AB1] fresh policy=ALL');}catch(_){}
+  }
+
+  async function attempt(forceRelay,waitMs){
+    if(epoch!==netRecoveryEpoch||netManualStop)return false;
+
+    netForceRelayForNextStart=!!forceRelay;
+    setState('','카메라 자동 재연결',
+      forceRelay?'TURN relay 강제 재시도':'새 네트워크에서 직접/TURN 재협상');
+
+    await start();
+
+    const attemptPc=pc;
+    if(!attemptPc)return false;
+
+    return await netWaitConnected(attemptPc,epoch,waitMs);
+  }
+
+  let ok=false;
+
+  if(relayFirst){
+    /* First handover recovery attempt: relay-only immediately.
+     * No 900ms fallback sleep here because no failed fresh ALL PC exists yet. */
+    ok=await attempt(true,NET_RELAY_CONNECT_MS);
+  }else{
+    ok=await attempt(false,NET_CONNECT_WATCHDOG_MS);
+  }
+
+  if(!ok&&epoch===netRecoveryEpoch&&!netManualStop&&!relayFirst){
+    const staleSid=sessionId;
+    await cleanup(false);               // PC-FIRST again before fallback stop
+    netRecoveryUiLock();
+    await netPostStopSid(staleSid);
+    await netSleep(900);                // give ESP peer teardown room before relay retry
+
+    ok=await attempt(true,NET_RELAY_CONNECT_MS);
+  }
+
+  /* [CAM-MEDIA-FIRST-FRAME-GUARD-V3-EXACT-20260903]
+   * ALL/relay can both fail in the asymmetric DTLS state observed on hardware.
+   * The user's manual Stop -> Start recovered it, so automate exactly ONE
+   * final clean teardown followed by a fresh ALL-policy PeerConnection. */
+  if(!ok&&epoch===netRecoveryEpoch&&!netManualStop){
+    const staleSid=sessionId;
+    await cleanup(false);
+    netRecoveryUiLock();
+    setState('','카메라 자동 재연결','ESP 세션 정리 후 최종 재시도');
+    await netPostStopSid(staleSid);
+    await netSleep(1000);
+
+    ok=await attempt(false,NET_CONNECT_WATCHDOG_MS);
+  }
+
+  if(epoch!==netRecoveryEpoch||netManualStop)return;
+
+  netRecovering=false;
+  netForceRelayForNextStart=false;
+
+  if(ok&&pc){
+    setTuneDisabled(false);
+    setState('ok','LIVE',profileShort(selectedProfile())+' · 망 전환 자동복구 완료');
+  }else{
+    const staleSid=sessionId;
+    await cleanup(false);
+    await netPostStopSid(staleSid);
+    setRunning(false);
+    setTuneDisabled(false);
+    setState('err','연결 오류','망 전환 자동복구 실패 · 새 네트워크가 안정된 뒤 시작을 다시 눌러 주세요.');
+  }
+}
+const WEBRTC_STUN_URL='stun:stun.l.google.com:19302';
+/* [TURN443-BROWSER-AB-20260831]
+ * Keep existing STUN/P2P behavior and add TURN/TLS over TCP 443 only on the
+ * browser side for the first A/B. iceTransportPolicy stays 'all', so direct
+ * host/srflx paths remain preferred and relay is available as fallback. */
+const WEBRTC_TURN_URL='turns:turn.example.com:443?transport=tcp';
+const WEBRTC_TURN_USER='YOUR_TURN_USER';
+const WEBRTC_TURN_CREDENTIAL='YOUR_TURN_PASSWORD';
+
+/* Chrome may keep a .local host candidate even after STUN produced a numeric
+ * srflx candidate. esp_peer 1.5.4 cannot resolve .local names.
+ * If a numeric srflx exists, omit only .local candidate lines from the SDP
+ * POSTed to ESP. The browser localDescription itself remains untouched. */
+function sdpForEsp(sdp){
+  const lines=String(sdp||'').split(/\r\n/);
+  const hasSrflx=lines.some(l=>/^a=candidate:/i.test(l)&&/\styp\ssrflx(?:\s|$)/i.test(l)&&!/\.local(?:\s|$)/i.test(l));
+  if(!hasSrflx)return sdp;
+  return lines.filter(l=>!(/^a=candidate:/i.test(l)&&/\.local(?:\s|$)/i.test(l))).join('\r\n');
+}
+
+
+let tuneTimer=null,tuneManual=false,tunePosting=false,tunePending=null;
+let autoCalBusy=false;
+/* [CAM-SAVE-STATUS-3STATE-R3-20260911]
+ * UI persistence status is deliberately independent from backend dirty polling.
+ * Only three user-facing states exist: 보정중 / 저장됨 / 저장실패.
+ * This prevents AUTO calibration/status polling from flipping 저장됨↔미저장. */
+const tuneSaveStateByProfile={'1080p':null,'720p-highspeed':null};
+function tuneVals(){return {saturation:+$('sat').value,contrast:+$('contrast').value,gamma_milli:+$('gamma').value,sharpen_pct:+$('sharp').value};}
+function tuneLabels(){ $('satV').textContent=$('sat').value; $('contrastV').textContent=$('contrast').value; $('gammaV').textContent=(+$('gamma').value/1000).toFixed(3); $('sharpV').textContent=(+$('sharp').value===0?'OFF':$('sharp').value+'%'); }
+function tuneNum(v,d){return (v===undefined||v===null)?d:v;}
+function tuneContrastMax(){return selectedProfile()==='720p-highspeed'?255:220;}
+function tuneSyncProfileLimits(){
+  const c=$('contrast');if(!c)return;
+  c.max=String(tuneContrastMax());
+  if(+c.value>+c.max)c.value=c.max;
+}
+function tuneModeState(enabled,dirty){
+  tuneManual=!!enabled;
+  const e=$('tuneMode');
+  const p=selectedProfile();
+  if(tuneSaveStateByProfile[p]===null)tuneSaveStateByProfile[p]=dirty?'calibrating':'saved';
+  const saveState=autoCalBusy?'calibrating':tuneSaveStateByProfile[p];
+  e.classList.toggle('manual',!!enabled);
+  e.classList.toggle('dirty',saveState==='calibrating');
+  const name=p==='720p-highspeed'?'720p60':'1080p';
+  const status=saveState==='failed'?'저장실패':(saveState==='calibrating'?'보정중':'저장됨');
+  e.textContent=name+(enabled?' 사용자':' AUTO')+' · '+status;
+}
+function setTuneSaveState(state,profile){
+  const p=profile||selectedProfile();
+  tuneSaveStateByProfile[p]=state;
+  if(p===selectedProfile())tuneModeState(tuneManual,false);
+}
+function setTuneDisabled(on){const lock=!!on||autoCalBusy;['sat','gamma','sharp','contrast','hue','wbMode','wbTemp','wbAuto','wbManual','btnTuneApply','btnTuneReset','btnAutoCal'].forEach(id=>{if($(id))$(id).disabled=lock;});if(!lock)color2Labels();}
+function tuneProfileInfo(_t){
+  const e=$('tuneProfileInfo');if(!e)return;
+  e.textContent=selectedProfile()==='720p-highspeed'
+    ? '720p60 전용 설정 · 이 프로파일만 NVS에 저장합니다.'
+    : '1080p 전용 설정 · 이 프로파일만 NVS에 저장합니다.';
+}
+function setTuneInputs(t){
+  if(!t)return;
+  tuneSyncProfileLimits();
+  $('sat').value=tuneNum(t.saturation,136);
+  $('contrast').value=tuneNum(t.contrast,126);
+  $('gamma').value=tuneNum(t.gamma_milli,518);
+  /* Do not use "||100" here: sharpen=0 is a valid persisted OFF setting. */
+  $('sharp').value=tuneNum(t.sharpen_pct,100);
+  tuneLabels();
+  tuneModeState(!!t.enabled,!!t.dirty);
+  tuneProfileInfo(t);
+}
+async function postTuneRequest(request){
+  if(tunePosting){tunePending=request;return;}
+  tunePosting=true;
+  try{
+    const r=await fetch(API.isp,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const j=await r.json();
+    if(selectedProfile()===request.profile)setTuneInputs(j.isp_tune);
+  }catch(e){
+    setState('err','ISP 조정 실패',e.message||String(e));
+    throw e;
+  }finally{
+    tunePosting=false;
+    if(tunePending!==null){
+      const p=tunePending;
+      tunePending=null;
+      postTuneRequest(p).catch(()=>{});
+    }
+  }
+}
+function postTune(enabled,save){
+  const requestProfile=selectedProfile();
+  const request={enabled:!!enabled,save:!!save,profile:requestProfile};
+  if(enabled)Object.assign(request,tuneVals());
+  return postTuneRequest(request);
+}
+function scheduleTune(){
+  tuneLabels();
+  setTuneSaveState('calibrating');
+  tuneModeState(true,true);
+  if(tuneTimer)clearTimeout(tuneTimer);
+  tuneTimer=setTimeout(()=>{postTune(true,false).catch(()=>{});},180);
+}
+async function loadTune(){
+  try{
+    const p=selectedProfile();
+    const r=await fetch(API.status+'?profile='+encodeURIComponent(p),{cache:'no-store'});
+    if(r.ok){
+      const j=await r.json();
+      if(selectedProfile()===p)setTuneInputs(j.isp_tune);
+    }
+  }catch(_){tuneLabels();}
+}
+
+/* [CAM-COLOR2-STAGE2-20260901]
+ * One serialized POST API handles get/set/reset.
+ * Existing saturation/gamma/sharpness/contrast API is left untouched. */
+let color2Timer=null;
+let color2Chain=Promise.resolve();
+let color2State={enabled:false,hue:0,wb_manual:false,wb_temp_k:6500,dirty:false};
+
+function color2Vals(){
+  return {
+    hue:+$('hue').value,
+    wb_manual:$('wbMode').value==='manual',
+    wb_temp_k:+$('wbTemp').value
+  };
+}
+function color2Labels(){
+  if(!$('hue')||!$('wbMode')||!$('wbTemp'))return;
+  $('hueV').textContent=(+$('hue').value>0?'+':'')+$('hue').value;
+  const manual=$('wbMode').value==='manual';
+
+  $('wbModeV').textContent=manual?'MANUAL':'AUTO';
+  $('wbTempV').textContent=$('wbTemp').value+'K';
+
+  if($('wbAuto')){
+    $('wbAuto').classList.toggle('active',!manual);
+    $('wbAuto').setAttribute('aria-pressed',manual?'false':'true');
+  }
+  if($('wbManual')){
+    $('wbManual').classList.toggle('active',manual);
+    $('wbManual').setAttribute('aria-pressed',manual?'true':'false');
+  }
+  if($('wbStatus')){
+    $('wbStatus').innerHTML=manual
+      ? '<span class="wbDot"></span>수동 화이트밸런스 고정 · 기준 '+$('wbTemp').value+'K'
+      : '<span class="wbDot"></span>자동 화이트밸런스 · ISP/IPA 자동 보정';
+  }
+  if($('wbTempWrap')){
+    $('wbTempWrap').classList.toggle('disabled',!manual);
+    $('wbTempWrap').classList.toggle('collapsed',!manual);
+  }
+
+  /* [CAM-WB-UI-V3-20260901]
+   * AUTO hides temperature trim completely; MANUAL expands it.
+   * Backend wbMode/wbTemp values are unchanged. */
+
+  /* Global tune lock still wins over MANUAL state. */
+  const globallyLocked=$('btnTuneApply')?!!$('btnTuneApply').disabled:false;
+  $('wbTemp').disabled=globallyLocked||!manual;
+  if($('wbAuto'))$('wbAuto').disabled=globallyLocked;
+  if($('wbManual'))$('wbManual').disabled=globallyLocked;
+}
+function setColor2Inputs(c){
+  if(!c)return;
+  color2State=c;
+  $('hue').value=tuneNum(c.hue,0);
+  $('wbMode').value=c.wb_manual?'manual':'auto';
+  $('wbTemp').value=tuneNum(c.wb_temp_k,6500);
+  color2Labels();
+}
+async function color2Do(req){
+  const requestProfile=req.profile||selectedProfile();
+  const body=Object.assign({},req,{profile:requestProfile});
+  const r=await fetch(API.color2,{
+    method:'POST',
+    cache:'no-store',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  });
+  if(!r.ok)throw new Error('COLOR2 HTTP '+r.status);
+  const j=await r.json();
+  if(j&&j.color2&&selectedProfile()===requestProfile)setColor2Inputs(j.color2);
+  return j;
+}
+function postColor2(req){
+  color2Chain=color2Chain.catch(()=>{}).then(()=>color2Do(req));
+  return color2Chain;
+}
+function scheduleColor2(){
+  color2Labels();
+  setTuneSaveState('calibrating');
+  if(color2Timer)clearTimeout(color2Timer);
+  const p=selectedProfile();
+  color2Timer=setTimeout(()=>{
+    color2Timer=null;
+    postColor2(Object.assign({op:'set',save:false,profile:p},color2Vals()))
+      .catch(e=>setState('err','색상 조정 실패',e.message||String(e)));
+  },180);
+}
+async function loadColor2(){
+  const p=selectedProfile();
+  try{await postColor2({op:'get',profile:p});}
+  catch(e){if(selectedProfile()===p)color2Labels();}
+}
+async function waitTuneIdle(){
+  tunePending=null;
+  const end=Date.now()+2500;
+  while(tunePosting&&Date.now()<end)await new Promise(r=>setTimeout(r,20));
+  if(tunePosting)throw new Error('기존 화질 조정 응답 대기 시간 초과');
+}
+async function saveAllTune(){
+  try{
+    if(tuneTimer){clearTimeout(tuneTimer);tuneTimer=null;}
+    if(color2Timer){clearTimeout(color2Timer);color2Timer=null;}
+    await waitTuneIdle();
+    /* Preserve the existing ISP-tune enabled/disabled state. */
+    const p=selectedProfile();
+    await postTune(!!tuneManual,true);
+    await postColor2(Object.assign({op:'set',save:true,profile:p},color2Vals()));
+    setTuneSaveState('saved',p);
+    setState('ok','저장됨','');
+  }catch(e){
+    setTuneSaveState('failed');
+    setState('err','저장 실패','');
+  }
+}
+async function resetAllTune(){
+  try{
+    if(tuneTimer){clearTimeout(tuneTimer);tuneTimer=null;}
+    if(color2Timer){clearTimeout(color2Timer);color2Timer=null;}
+    await waitTuneIdle();
+    const p=selectedProfile();
+    await postTune(false,true);
+    await postColor2({op:'reset',save:true,profile:p});
+    setTuneSaveState('saved',p);
+    setState('ok','기본 화질 복귀',(p==='720p-highspeed'?'720p60':'1080p')+' 프로파일만 ISP/IPA AUTO 화질로 복귀했습니다. 색조 0 · 화이트밸런스 AUTO.');
+  }catch(e){
+    setTuneSaveState('failed');
+    setState('err','기본 화질 복귀 실패',e.message||String(e));
+  }
+}
+
+/* [CAM-AUTO-COLOR-CAL-R1-20260910]
+ * One-click end-to-end 1080-reference -> 720 calibration.
+ *
+ * The browser owns profile switching/PeerConnection by design, so the browser
+ * orchestrates the sequence while ESP supplies fresh next-frame O_UYY samples.
+ * Every correction itself is applied by the existing ESP APIs.
+ *
+ * Safety:
+ *   - never changes/saves 1080 tuning
+ *   - 720 preview changes are RAM-only until the very end
+ *   - sharpness is preserved (not inferable from the current Y/U/V statistic)
+ *   - bounded coordinate search; no continuous feedback loop
+ *   - on failure, best-effort rollback to the pre-calibration 720 RAM state
+ */
+const AUTO_CAL_PROFILE_1080='1080p';
+const AUTO_CAL_PROFILE_720='720p-highspeed';
+
+function autoCalSleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function autoCalClamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+function autoCalInfo(text,cls=''){
+  const e=$('autoCalInfo');if(!e)return;
+  e.className='autoCalInfo'+(cls?' '+cls:'');
+  e.textContent=text;
+}
+function autoCalProfileMatches(camera,p){
+  if(!camera||!camera.running)return false;
+  if(p===AUTO_CAL_PROFILE_1080)return Number(camera.width)===1920&&Number(camera.height)===1080;
+  return Number(camera.width)===1288&&Number(camera.height)===728;
+}
+function autoCalSetProfileRadio(p){
+  const r=document.querySelector('input[name="profile"][value="'+p+'"]');
+  if(!r)throw new Error('프로파일 UI를 찾을 수 없습니다: '+p);
+  r.checked=true;
+  try{localStorage.setItem('ha_cam_profile',p);}catch(_){}
+}
+async function autoCalStatus(p,requestMeasure=false){
+  const q='?profile='+encodeURIComponent(p)+(requestMeasure?'&color_measure=1':'');
+  const r=await fetch(API.status+q,{cache:'no-store'});
+  if(!r.ok)throw new Error('상태 조회 HTTP '+r.status);
+  return await r.json();
+}
+async function autoCalWaitProfileReady(p,maxMs=18000){
+  const end=Date.now()+maxMs;
+  while(Date.now()<end){
+    const j=await autoCalStatus(p,false);
+    if(autoCalProfileMatches(j.camera,p)&&j.peer_connected){
+      return j;
+    }
+    await autoCalSleep(160);
+  }
+  throw new Error(profileShort(p)+' 영상 준비 시간 초과');
+}
+async function autoCalEnsureProfile(p){
+  if(selectedProfile()!==p){
+    autoCalSetProfileRadio(p);
+    await loadTune();
+    await loadColor2();
+  }
+
+  if(running&&!pc)setRunning(false);
+  if(running&&pc){
+    if(!autoCalProfileMatches((await autoCalStatus(p,false)).camera,p)){
+      await switchLiveProfile();
+    }
+  }else{
+    netCam15RecoveryUsed=false;
+    await start();
+  }
+
+  await autoCalWaitProfileReady(p);
+  /* [CAM-AUTO-COLOR-CAL-R2-1080-SETTLE]
+   * Give the 1080 AUTO AE/AWB reference slightly more time than R1.
+   * R1 used 2200 ms; R2 uses 3000 ms before the reference request. */
+  await autoCalSleep(3000);
+}
+async function autoCalMeasure(p){
+  let j=await autoCalStatus(p,true);
+  let req=Number(j.color_measure_request||0);
+  if(!req){
+    /* A profile transition may have completed at browser level just before
+     * camera.running became visible to this request. Give it one short retry. */
+    await autoCalSleep(120);
+    j=await autoCalStatus(p,true);
+    req=Number(j.color_measure_request||0);
+  }
+  if(!req)throw new Error('색상 측정 요청을 시작하지 못했습니다.');
+
+  const end=Date.now()+2500;
+  while(Date.now()<end){
+    const s=await autoCalStatus(p,false);
+    const m=s.color_measure;
+    if(m&&m.valid&&Number(m.request_id)===req){
+      const expected=(p===AUTO_CAL_PROFILE_1080)?'1080p':'720p60-native';
+      if(String(m.profile)!==expected)throw new Error('측정 프로파일 불일치');
+      return {
+        y:Number(m.y_mean),p10:Number(m.y_p10),p50:Number(m.y_p50),p90:Number(m.y_p90),
+        u:Number(m.u_mean),v:Number(m.v_mean),ua:Number(m.u_abs),va:Number(m.v_abs)
+      };
+    }
+    await autoCalSleep(55);
+  }
+  throw new Error('다음 프레임 색상 측정 시간 초과');
+}
+function autoCalColorCenterErr(m,t){
+  const du=m.u-t.u,dv=m.v-t.v;
+  return du*du+dv*dv;
+}
+function autoCalColorStrengthMag(m){
+  return Math.hypot(Number(m.ua),Number(m.va));
+}
+function autoCalColorStrengthErr(m,t){
+  /* [CAM-AUTO-COLOR-CAL-R5_1-CHROMA-MAG]
+   * Saturation is one scalar gain, while Hue rotates chroma between U/V axes.
+   * Therefore Uabs and Vabs cannot in general be forced independently by one
+   * Saturation value. Match the rotation-invariant chroma magnitude instead:
+   * Cabs = hypot(Uabs,Vabs). */
+  const tc=Math.max(1.5,autoCalColorStrengthMag(t));
+  const mc=autoCalColorStrengthMag(m);
+  const dc=(mc-tc)/tc;
+  return dc*dc;
+}
+function autoCalColorJointErr(m,t){
+  /* [CAM-AUTO-COLOR-CAL-R5_3-JOINT-COLOR]
+   * Final refinement must satisfy BOTH independent final gates. Normalize each
+   * squared error by its gate so Hue/WB and Saturation can trade only inside
+   * the same bounded 3-D neighborhood, not by weakening acceptance. */
+  const centerNorm=autoCalColorCenterErr(m,t)/(3.2*3.2);
+  const strengthNorm=autoCalColorStrengthErr(m,t)/(0.18*0.18);
+  return centerNorm+strengthNorm;
+}
+function autoCalChromaErr(m,t){
+  /* Composite is used only as a finite/final diagnostic value. */
+  return autoCalColorCenterErr(m,t)+4.0*autoCalColorStrengthErr(m,t);
+}
+function autoCalToneWidth(m){return Number(m.p90)-Number(m.p10);}
+function autoCalLumaErr(m,t){
+  /* [CAM-AUTO-COLOR-CAL-R2-TONE-OBJECTIVE]
+   * R1 could stop at a matching mean/median while 720 remained visibly flat.
+   * Make p90-p10 tone width the dominant term, while still keeping the
+   * midpoint and overall mean near the 1080 reference. */
+  const dy=m.y-t.y;
+  const d50=m.p50-t.p50;
+  const d10=m.p10-t.p10;
+  const d90=m.p90-t.p90;
+  const dw=autoCalToneWidth(m)-autoCalToneWidth(t);
+  return 2.6*dw*dw + 0.85*d50*d50 + 0.22*dy*dy + 0.12*(d10*d10+d90*d90);
+}
+function autoCalFinalAccept(m,t){
+  const targetW=autoCalToneWidth(t);
+  const gotW=autoCalToneWidth(m);
+  const widthErr=Math.abs(gotW-targetW);
+  /* [CAM-AUTO-COLOR-CAL-R5_3-TONE-GATE]
+   * Keep the tightened tone-width gate. R5.3 does not loosen acceptance;
+   * it only lets the 720 search use the already-advertised driver ceiling
+   * through 255. 1080 remains capped at 220. */
+  const widthTol=Math.max(14,targetW*0.18);
+  const chromaDist=Math.hypot(m.u-t.u,m.v-t.v);
+  const strengthRel=Math.sqrt(autoCalColorStrengthErr(m,t));
+  const yOk=Math.abs(m.y-t.y)<=9.0 && Math.abs(m.p50-t.p50)<=9.0;
+  const widthOk=widthErr<=widthTol;
+  const chromaOk=chromaDist<=3.2;
+  /* [CAM-AUTO-COLOR-CAL-R5_1-STRENGTH-GATE]
+   * strengthRel is now the relative error of rotation-invariant Cabs.
+   * Keep a conservative 18% final limit. */
+  const strengthOk=strengthRel<=0.18;
+  return {ok:yOk&&widthOk&&chromaOk&&strengthOk,
+          yOk,widthOk,chromaOk,strengthOk,
+          targetW,gotW,widthErr,widthTol,chromaDist,strengthRel};
+}
+async function autoCalGet720Snapshot(){
+  const status=await autoCalStatus(AUTO_CAL_PROFILE_720,false);
+  const cj=await postColor2({op:'get',profile:AUTO_CAL_PROFILE_720});
+  const t=status.isp_tune||{};
+  const c=(cj&&cj.color2)||{};
+  return {
+    tune:{
+      enabled:!!t.enabled,
+      sat:Number(t.saturation??136),
+      con:Number(t.contrast??126),
+      gamma:Number(t.gamma_milli??518),
+      sharp:Number(t.sharpen_pct??100)
+    },
+    color:{
+      hue:Number(c.hue??0),
+      manual:!!c.wb_manual,
+      temp:Number(c.wb_temp_k??6500)
+    }
+  };
+}
+async function autoCalPreviewColor(st){
+  /* [CAM-AUTO-CAL-R5-NVS-FINAL-ONLY] Never persist search candidates. */
+  await postColor2({
+    op:'set',save:false,profile:AUTO_CAL_PROFILE_720,
+    hue:Math.round(st.hue),wb_manual:true,wb_temp_k:Math.round(st.temp)
+  });
+}
+async function autoCalPreviewTune(st){
+  /* [CAM-AUTO-CAL-R5-NVS-FINAL-ONLY] Never persist search candidates. */
+  await waitTuneIdle();
+  await postTuneRequest({
+    enabled:true,save:false,profile:AUTO_CAL_PROFILE_720,
+    saturation:Math.round(st.sat),contrast:Math.round(st.con),
+    gamma_milli:Math.round(st.gamma),sharpen_pct:Math.round(st.sharp)
+  });
+}
+async function autoCalCommitFinal(st){
+  /* The two NVS owners are intentionally committed only in this final phase:
+   * basic ISP preset, then Color2 Hue/WB. There are no NVS writes in search. */
+  await waitTuneIdle();
+  await postTuneRequest({
+    enabled:true,save:true,profile:AUTO_CAL_PROFILE_720,
+    saturation:Math.round(st.sat),contrast:Math.round(st.con),
+    gamma_milli:Math.round(st.gamma),sharpen_pct:Math.round(st.sharp)
+  });
+  await postColor2({
+    op:'set',save:true,profile:AUTO_CAL_PROFILE_720,
+    hue:Math.round(st.hue),wb_manual:true,wb_temp_k:Math.round(st.temp)
+  });
+}
+async function autoCalApplyParam(st,key){
+  if(key==='hue'||key==='temp')await autoCalPreviewColor(st);
+  else await autoCalPreviewTune(st);
+}
+async function autoCalOptimizeParam(st,key,step,lo,hi,current,target,obj,label){
+  const base=Number(st[key]);
+  let bestVal=base,bestM=current,bestE=obj(current,target);
+  let lastVal=base;
+  const candidates=[autoCalClamp(base-step,lo,hi),autoCalClamp(base+step,lo,hi)];
+  for(const v0 of candidates){
+    const v=Math.round(v0);
+    if(v===base||v===lastVal)continue;
+    st[key]=v;
+    await autoCalApplyParam(st,key);
+    lastVal=v;
+    await autoCalSleep(280);
+    const m=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+    const e=obj(m,target);
+    if(e<bestE){bestE=e;bestVal=v;bestM=m;}
+  }
+  st[key]=bestVal;
+  if(lastVal!==bestVal){
+    await autoCalApplyParam(st,key);
+    await autoCalSleep(220);
+  }
+  autoCalInfo(label+' · '+key+'='+bestVal+' · 오차 '+Math.sqrt(bestE).toFixed(2));
+  return bestM;
+}
+async function autoCalOptimizeColorCenter2D(st,hStep,tStep,current,target,label){
+  /* [CAM-AUTO-COLOR-CAL-R5_2-CENTER-2D]
+   * Hue and WB temperature are coupled. Evaluate the full bounded 3x3
+   * neighborhood instead of doing two sequential 1-D moves. Saturation is
+   * held fixed; this pass runs AFTER all Saturation/Cabs tuning. */
+  const baseH=Math.round(st.hue),baseT=Math.round(st.temp);
+  const hs=[autoCalClamp(baseH-hStep,-128,127),baseH,autoCalClamp(baseH+hStep,-128,127)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+  const ts=[autoCalClamp(baseT-tStep,3000,9000),baseT,autoCalClamp(baseT+tStep,3000,9000)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+
+  let bestH=baseH,bestT=baseT,bestM=current,bestE=autoCalColorCenterErr(current,target);
+  let lastH=baseH,lastT=baseT;
+
+  for(const h of hs){
+    for(const t of ts){
+      if(h===baseH&&t===baseT)continue;
+      st.hue=h;st.temp=t;
+      await autoCalPreviewColor(st);
+      lastH=h;lastT=t;
+      await autoCalSleep(300);
+      const m=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+      const e=autoCalColorCenterErr(m,target);
+      if(e<bestE){bestE=e;bestH=h;bestT=t;bestM=m;}
+    }
+  }
+
+  st.hue=bestH;st.temp=bestT;
+  if(lastH!==bestH||lastT!==bestT){
+    await autoCalPreviewColor(st);
+    await autoCalSleep(240);
+  }
+  autoCalInfo(label+' · Hue '+bestH+' · WB '+bestT+'K · 색 중심 '+Math.sqrt(bestE).toFixed(2));
+  return bestM;
+}
+async function autoCalOptimizeColor3D(st,hStep,tStep,sStep,current,target,label){
+  /* [CAM-AUTO-COLOR-CAL-R5_3-COLOR-3D]
+   * Final local refinement jointly evaluates Hue x WB x Saturation.
+   * Saturation stays within the existing 64..224 range; this does NOT widen
+   * the saturation control. The objective is gate-normalized U/V center +
+   * rotation-invariant Cabs magnitude. */
+  const baseH=Math.round(st.hue),baseT=Math.round(st.temp),baseS=Math.round(st.sat);
+  const hs=[autoCalClamp(baseH-hStep,-128,127),baseH,autoCalClamp(baseH+hStep,-128,127)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+  const ts=[autoCalClamp(baseT-tStep,3000,9000),baseT,autoCalClamp(baseT+tStep,3000,9000)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+  const ss=[autoCalClamp(baseS-sStep,64,224),baseS,autoCalClamp(baseS+sStep,64,224)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+
+  let bestH=baseH,bestT=baseT,bestS=baseS,bestM=current;
+  let bestE=autoCalColorJointErr(current,target);
+  let lastH=baseH,lastT=baseT,lastS=baseS;
+
+  for(const h of hs){
+    for(const t of ts){
+      for(const sat of ss){
+        if(h===baseH&&t===baseT&&sat===baseS)continue;
+
+        st.hue=h;st.temp=t;st.sat=sat;
+        if(h!==lastH||t!==lastT)await autoCalPreviewColor(st);
+        if(sat!==lastS)await autoCalPreviewTune(st);
+        lastH=h;lastT=t;lastS=sat;
+
+        await autoCalSleep(300);
+        const m=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+        const e=autoCalColorJointErr(m,target);
+        if(e<bestE){
+          bestE=e;bestH=h;bestT=t;bestS=sat;bestM=m;
+        }
+      }
+    }
+  }
+
+  st.hue=bestH;st.temp=bestT;st.sat=bestS;
+  if(lastH!==bestH||lastT!==bestT)await autoCalPreviewColor(st);
+  if(lastS!==bestS)await autoCalPreviewTune(st);
+  if(lastH!==bestH||lastT!==bestT||lastS!==bestS)await autoCalSleep(260);
+
+  const center=Math.sqrt(autoCalColorCenterErr(bestM,target));
+  const strength=Math.sqrt(autoCalColorStrengthErr(bestM,target));
+  autoCalInfo(label+' · Hue '+bestH+' · WB '+bestT+'K · 채도 '+bestS+
+              ' · 색 중심 '+center.toFixed(2)+' · Cabs 오차 '+(strength*100).toFixed(1)+'%');
+  return bestM;
+}
+async function autoCalOptimizeLuma2D(st,gStep,cStep,current,target,label){
+  /* [CAM-AUTO-COLOR-CAL-R2-2D-LUMA]
+   * Gamma and Contrast strongly interact. Evaluate a bounded 3x3 neighborhood
+   * as pairs instead of R1's sequential 1-D search. Each round recenters on
+   * the best measured pair. */
+  const baseG=Math.round(st.gamma),baseC=Math.round(st.con);
+  const gs=[autoCalClamp(baseG-gStep,350,1000),baseG,autoCalClamp(baseG+gStep,350,1000)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+  const cs=[autoCalClamp(baseC-cStep,80,255),baseC,autoCalClamp(baseC+cStep,80,255)]
+    .map(Math.round).filter((v,i,a)=>a.indexOf(v)===i);
+
+  let bestG=baseG,bestC=baseC,bestM=current,bestE=autoCalLumaErr(current,target);
+  let lastG=baseG,lastC=baseC;
+
+  for(const g of gs){
+    for(const c of cs){
+      if(g===baseG&&c===baseC)continue;
+      st.gamma=g;st.con=c;
+      await autoCalPreviewTune(st);
+      lastG=g;lastC=c;
+      await autoCalSleep(300);
+      const m=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+      const e=autoCalLumaErr(m,target);
+      if(e<bestE){bestE=e;bestG=g;bestC=c;bestM=m;}
+    }
+  }
+
+  st.gamma=bestG;st.con=bestC;
+  if(lastG!==bestG||lastC!==bestC){
+    await autoCalPreviewTune(st);
+    await autoCalSleep(240);
+  }
+
+  const w=autoCalToneWidth(bestM),tw=autoCalToneWidth(target);
+  autoCalInfo(label+' · 감마 '+(bestG/1000).toFixed(3)+' · 콘트라스트 '+bestC+
+              ' · 명암폭 '+w.toFixed(0)+'/'+tw.toFixed(0));
+  return bestM;
+}
+async function autoCalRollback720(snap,persist=false){
+  try{
+    if(selectedProfile()!==AUTO_CAL_PROFILE_720||!running||!pc)return false;
+    await postTuneRequest({
+      enabled:!!snap.tune.enabled,save:!!persist,profile:AUTO_CAL_PROFILE_720,
+      saturation:Math.round(snap.tune.sat),contrast:Math.round(snap.tune.con),
+      gamma_milli:Math.round(snap.tune.gamma),sharpen_pct:Math.round(snap.tune.sharp)
+    });
+    await postColor2({
+      op:'set',save:!!persist,profile:AUTO_CAL_PROFILE_720,
+      hue:Math.round(snap.color.hue),wb_manual:!!snap.color.manual,
+      wb_temp_k:Math.round(snap.color.temp)
+    });
+    return true;
+  }catch(_){return false;}
+}
+async function run720AutoCalibration(){
+  if(autoCalBusy)return;
+  autoCalBusy=true;
+  setTuneSaveState('calibrating',AUTO_CAL_PROFILE_720);
+  let snapshot=null;
+  let previewChanged=false;
+  let finalSaveStarted=false;
+
+  if(tuneTimer){clearTimeout(tuneTimer);tuneTimer=null;}
+  if(color2Timer){clearTimeout(color2Timer);color2Timer=null;}
+  await waitTuneIdle().catch(()=>{});
+  await color2Chain.catch(()=>{});
+  setTuneDisabled(true);
+  setProfileControlsDisabled(true);
+
+  try{
+    autoCalInfo('준비 중 · 현재 720 설정을 안전하게 보관합니다.');
+    snapshot=await autoCalGet720Snapshot();
+
+    autoCalInfo('1/5 · 1080 기준 영상으로 자동 전환 중...');
+    setState('','720 색상 자동보정','1080 기준 영상 준비');
+    await autoCalEnsureProfile(AUTO_CAL_PROFILE_1080);
+
+    autoCalInfo('2/5 · 1080 중앙 1288×728 기준색 측정 중...');
+    const target=await autoCalMeasure(AUTO_CAL_PROFILE_1080);
+    ESP_AUTO_CAL_TARGET=target; /* debug-visible in browser console */
+
+    autoCalInfo('3/5 · 720p60으로 자동 전환 중...');
+    autoCalSetProfileRadio(AUTO_CAL_PROFILE_720);
+    await loadTune();
+    await loadColor2();
+    if(running&&pc)await switchLiveProfile();else await start();
+    await autoCalWaitProfileReady(AUTO_CAL_PROFILE_720);
+    await autoCalSleep(2200);
+
+    const st={
+      hue:autoCalClamp(snapshot.color.hue,-128,127),
+      temp:autoCalClamp(snapshot.color.manual?snapshot.color.temp:6500,3000,9000),
+      sat:autoCalClamp(snapshot.tune.sat,64,224),
+      con:autoCalClamp(snapshot.tune.con,80,255),
+      gamma:autoCalClamp(snapshot.tune.gamma,350,1000),
+      sharp:autoCalClamp(snapshot.tune.sharp,0,200)
+    };
+
+    /* Auto calibration owns manual WB + manual basic tune only for 720.
+     * All preview changes remain RAM-only until final validation succeeds. */
+    await autoCalPreviewColor(st);
+    await autoCalPreviewTune(st);
+    previewChanged=true;
+    await autoCalSleep(350);
+    let cur=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+    const initialChroma=autoCalChromaErr(cur,target);
+    const initialLuma=autoCalLumaErr(cur,target);
+
+    /* [CAM-AUTO-COLOR-CAL-R5-CENTER]
+     * Hue/WB now own only the U/V center. Saturation is intentionally excluded
+     * here so it can no longer be pulled down merely to improve mean U/V. */
+    const centerRounds=[
+      {h:16,t:500},
+      {h:8,t:200},
+      {h:4,t:100}
+    ];
+    for(let i=0;i<centerRounds.length;i++){
+      const r=centerRounds[i];
+      autoCalInfo('4/5 · U/V 색 중심 탐색 '+(i+1)+'/'+centerRounds.length+' · RAM 미리보기');
+      cur=await autoCalOptimizeParam(st,'hue',r.h,-128,127,cur,target,autoCalColorCenterErr,'색 중심 '+(i+1)+'/'+centerRounds.length);
+      cur=await autoCalOptimizeParam(st,'temp',r.t,3000,9000,cur,target,autoCalColorCenterErr,'색 중심 '+(i+1)+'/'+centerRounds.length);
+      if(i>=1&&autoCalColorCenterErr(cur,target)<0.8)break;
+    }
+
+    /* [CAM-AUTO-COLOR-CAL-R5_3-CONTRAST-255]
+     * Keep the proven Gamma x Contrast 2-D objective and all acceptance rules.
+     * Only 720's ceiling moves 220 -> 255. From a saved 200 baseline the first
+     * 50-step round can reach 250; the following 25-step round can test 255. */
+    const lumaRounds=[
+      {g:120,c:50},
+      {g:60,c:25},
+      {g:30,c:12}
+    ];
+    for(let i=0;i<lumaRounds.length;i++){
+      const r=lumaRounds[i];
+      autoCalInfo('4/5 · 명암폭 포함 2D 밝기 탐색 '+(i+1)+'/'+lumaRounds.length+' · RAM 미리보기');
+      cur=await autoCalOptimizeLuma2D(st,r.g,r.c,cur,target,
+                                      '2D 밝기 '+(i+1)+'/'+lumaRounds.length);
+      const a=autoCalFinalAccept(cur,target);
+      if(i>=1&&a.widthErr<=Math.max(10,a.targetW*0.16)&&
+          Math.abs(cur.p50-target.p50)<=5.0)break;
+    }
+
+    /* [CAM-AUTO-COLOR-CAL-R5-STRENGTH]
+     * Tune chroma magnitude only after the luma curve is settled, because
+     * Gamma/Contrast can slightly change the measured Uabs/Vabs distribution.
+     * Saturation candidates are RAM-only and optimize normalized Uabs/Vabs. */
+    const satSteps=[32,16,8,4];
+    for(let i=0;i<satSteps.length;i++){
+      autoCalInfo('4/5 · Uabs/Vabs 색 강도 탐색 '+(i+1)+'/'+satSteps.length+' · RAM 미리보기');
+      cur=await autoCalOptimizeParam(st,'sat',satSteps[i],64,224,cur,target,
+                                    autoCalColorStrengthErr,'색 강도 '+(i+1)+'/'+satSteps.length);
+      if(i>=1&&Math.sqrt(autoCalColorStrengthErr(cur,target))<=0.18)break;
+    }
+
+    /* [CAM-AUTO-COLOR-CAL-R5_3-FINAL-COLOR-3D]
+     * R5.2 still finished with Hue x WB only. Its failed sample showed that
+     * Cabs and U/V center need one final COUPLED local refinement. Keep the
+     * physical Saturation range 64..224, but allow +/-8 then +/-4 around the
+     * already-selected Cabs value while Hue and WB move at the same time. */
+    const finalColor3DRounds=[
+      {h:8,t:300,s:8},
+      {h:4,t:150,s:4}
+    ];
+    for(let i=0;i<finalColor3DRounds.length;i++){
+      const r=finalColor3DRounds[i];
+      autoCalInfo('4/5 · 최종 Hue×WB×채도 3D 탐색 '+(i+1)+'/'+finalColor3DRounds.length+' · RAM 미리보기');
+      cur=await autoCalOptimizeColor3D(
+        st,r.h,r.t,r.s,cur,target,
+        '최종 색 3D '+(i+1)+'/'+finalColor3DRounds.length
+      );
+      const center=Math.sqrt(autoCalColorCenterErr(cur,target));
+      const strength=Math.sqrt(autoCalColorStrengthErr(cur,target));
+      if(center<=2.4&&strength<=0.10)break;
+    }
+
+    /* One final fresh frame validates the exact state that will be saved. */
+    await autoCalPreviewColor(st);
+    await autoCalPreviewTune(st);
+    await autoCalSleep(320);
+    const finalM=await autoCalMeasure(AUTO_CAL_PROFILE_720);
+    const finalChroma=autoCalChromaErr(finalM,target);
+    const finalLuma=autoCalLumaErr(finalM,target);
+
+    if(!Number.isFinite(finalChroma)||!Number.isFinite(finalLuma)){
+      throw new Error('최종 측정값이 유효하지 않습니다.');
+    }
+
+    /* R2 absolute gate: do not save a numerically centered but visibly-flat
+     * tone curve. A failure falls through to the existing rollback path. */
+    const accept=autoCalFinalAccept(finalM,target);
+    if(!accept.ok){
+      const why=[];
+      if(!accept.widthOk)why.push('명암폭 '+accept.gotW.toFixed(0)+'/'+accept.targetW.toFixed(0));
+      if(!accept.yOk)why.push('Y/중간톤');
+      if(!accept.chromaOk)why.push('색 중심 '+accept.chromaDist.toFixed(2));
+      if(!accept.strengthOk)why.push('색 강도 Cabs '+autoCalColorStrengthMag(finalM).toFixed(2)+'/'+autoCalColorStrengthMag(target).toFixed(2)+' ('+(accept.strengthRel*100).toFixed(0)+'%)');
+      throw new Error('최종 품질 기준 미달: '+why.join(' · '));
+    }
+
+    autoCalInfo('5/5 · 최종 검증 통과 · NVS 최종 저장 1회 단계...');
+    finalSaveStarted=true;
+    await autoCalCommitFinal(st);
+    finalSaveStarted=false;
+    setTuneSaveState('saved',AUTO_CAL_PROFILE_720);
+
+    /* Refresh UI from saved 720 state. */
+    await loadTune();
+    await loadColor2();
+
+    const du=finalM.u-target.u,dv=finalM.v-target.v,dy=finalM.y-target.y;
+    const dua=finalM.ua-target.ua,dva=finalM.va-target.va;
+    const dWidth=accept.gotW-accept.targetW;
+    autoCalInfo(
+      '완료 · Hue '+Math.round(st.hue)+' · WB '+Math.round(st.temp)+'K · 채도 '+Math.round(st.sat)+
+      ' · 감마 '+(st.gamma/1000).toFixed(3)+' · 콘트라스트 '+Math.round(st.con)+
+      ' · ΔY '+dy.toFixed(1)+' / ΔU '+du.toFixed(1)+' / ΔV '+dv.toFixed(1)+
+      ' / Cabs '+autoCalColorStrengthMag(finalM).toFixed(2)+'/'+autoCalColorStrengthMag(target).toFixed(2)+
+      ' / ΔUabs '+dua.toFixed(1)+' / ΔVabs '+dva.toFixed(1)+
+      ' / Δ명암폭 '+dWidth.toFixed(0),
+      'ok'
+    );
+    setState('ok','720 자동보정 완료',
+      'ΔY '+dy.toFixed(1)+' · ΔU '+du.toFixed(1)+' · ΔV '+dv.toFixed(1)+
+      ' · Cabs '+autoCalColorStrengthMag(finalM).toFixed(2)+'/'+autoCalColorStrengthMag(target).toFixed(2)+
+      ' · Uabs '+finalM.ua.toFixed(1)+'/'+target.ua.toFixed(1)+
+      ' · Vabs '+finalM.va.toFixed(1)+'/'+target.va.toFixed(1)+
+      ' · 명암폭 '+accept.gotW.toFixed(0)+'/'+accept.targetW.toFixed(0)+' · 저장됨');
+  }catch(e){
+    let restored=true;
+    if((previewChanged||finalSaveStarted)&&snapshot){
+      restored=await autoCalRollback720(snapshot,finalSaveStarted);
+    }
+    const msg=e&&e.message?e.message:String(e);
+    setTuneSaveState('failed',AUTO_CAL_PROFILE_720);
+    autoCalInfo(
+      restored
+        ?('실패 · 기존 720 설정으로 복원했습니다. · '+msg)
+        :('실패 · 720 설정 복원 확인이 필요합니다. · '+msg),
+      'err'
+    );
+    setState('err','720 자동보정 실패',msg);
+  }finally{
+    autoCalBusy=false;
+    setTuneDisabled(false);
+    setProfileControlsDisabled(false);
+    tuneModeState(tuneManual,false);
+  }
+}
+/* Avoid accidental global declaration errors in strict future wrappers while
+ * still exposing the last reference for console diagnostics. */
+let ESP_AUTO_CAL_TARGET=null;
+
+function selectedProfile(){return document.querySelector('input[name="profile"]:checked').value;}
+function profileShort(p){return p==='720p-highspeed'?'720p60':'1080p';}
+function setState(cls,title,detail){
+  const el=$('state'); el.className='state'+(cls?' '+cls:'');
+  el.innerHTML='<span class="dot"></span><strong>'+title+'</strong>'+
+    '<span class="stateDetail">'+(detail?'&nbsp;'+detail:'')+'</span>';
+}
+function setProfileControlsDisabled(disabled){
+  const lock=!!disabled||autoCalBusy;
+  document.querySelectorAll('.profile').forEach(x=>x.classList.toggle('disabled',lock));
+  document.querySelectorAll('input[name="profile"]').forEach(x=>x.disabled=lock);
+}
+function setRunning(on){
+  running=on;$('btnStart').disabled=on;$('btnStop').disabled=!on;
+  /* [CAM-PROFILE-SWITCH-EXACT-STOP-A1-20260908]
+   * Keep profile selection locked while a PC is starting/recovering.  Once
+   * THIS PC has decoded video, pollStats() re-enables the selector so a live
+   * 1080p<->720p change can perform STOP-PC-FIRST + exact sid teardown. */
+  setProfileControlsDisabled(on);
+}
+/* [CAM-ICE-RELAY-2OR350-TEST-20260904]
+ * SDP_ONLY early-send test:
+ * - natural ICE gather complete/end-of-candidates => finish immediately
+ * - first TURN relay => start a fixed 350 ms settle window
+ * - second distinct TURN relay => finish immediately
+ * - no relay => preserve the existing 2500 ms fallback
+ * This changes browser offer timing only; recovery/TURN policy stays unchanged. */
+async function waitIceComplete(p,ms=2500,relaySettleMs=350,relayTargetCount=2){
+  if(p.iceGatheringState==='complete')return;
+  await new Promise(resolve=>{
+    let done=false;
+    let settleTimer=null;
+    let fallbackTimer=null;
+    const relaySeen=new Set();
+
+    const cleanup=()=>{
+      if(fallbackTimer){clearTimeout(fallbackTimer);fallbackTimer=null;}
+      if(settleTimer){clearTimeout(settleTimer);settleTimer=null;}
+      p.removeEventListener('icegatheringstatechange',onGather);
+      p.removeEventListener('icecandidate',onCandidate);
+    };
+
+    const finish=()=>{
+      if(done)return;
+      done=true;
+      cleanup();
+      resolve();
+    };
+
+    const localRelayCount=()=>{
+      try{
+        const s=String((p.localDescription&&p.localDescription.sdp)||'');
+        const lines=s.split(/\r?\n/);
+        const uniq=new Set();
+        for(const line of lines){
+          const t=line.trim();
+          if(/^a=candidate:/i.test(t)&&/\styp\srelay(?:\s|$)/i.test(t))uniq.add(t);
+        }
+        return uniq.size;
+      }catch(_){
+        return 0;
+      }
+    };
+
+    const relayCount=()=>Math.max(relaySeen.size,localRelayCount());
+
+    const armSettle=()=>{
+      if(settleTimer||done)return;
+      settleTimer=setTimeout(finish,relaySettleMs);
+    };
+
+    function onGather(){
+      if(p.iceGatheringState==='complete')finish();
+    }
+
+    function onCandidate(e){
+      if(done)return;
+      if(!e.candidate){
+        finish();
+        return;
+      }
+      const raw=String(e.candidate.candidate||'');
+      const typ=String(e.candidate.type||'').toLowerCase();
+      const isRelay=(typ==='relay'||/\styp\srelay(?:\s|$)/i.test(raw));
+      if(!isRelay)return;
+
+      if(raw)relaySeen.add(raw);
+      const n=relayCount();
+      if(n>=relayTargetCount){
+        finish();
+        return;
+      }
+      if(n>=1)armSettle();
+    }
+
+    fallbackTimer=setTimeout(finish,ms);
+    p.addEventListener('icegatheringstatechange',onGather);
+    p.addEventListener('icecandidate',onCandidate);
+
+    const n=relayCount();
+    if(n>=relayTargetCount)finish();
+    else if(n>=1)armSettle();
+  });
+}
+let profileSwitching=false;
+
+/* [CAM-PROFILE-SWITCH-EXACT-STOP-A1-20260908]
+ * User-requested live profile change is a controlled session replacement:
+ *   old browser PC close -> exact old sid /stop until 200/404 -> fresh PC.
+ * Never use anonymous /stop and never evict another viewer. */
+async function profileStopExactSid(sid,maxMs=4200){
+  if(!sid)return true;
+  const end=Date.now()+maxMs;
+  while(Date.now()<end){
+    try{
+      const r=await netFetchWithTimeout(
+        API.stop+'?sid='+encodeURIComponent(sid),
+        {method:'POST',cache:'no-store',keepalive:true},
+        Math.min(1200,Math.max(300,end-Date.now()))
+      );
+      if(r.status===200||r.status===404)return true;
+      if(r.status!==202&&r.status!==409)return false;
+    }catch(_){}
+    await netSleep(120);
+  }
+  return false;
+}
+async function switchLiveProfile(){
+  if(profileSwitching||netRecovering||netManualStop||!running||!pc)return;
+  const oldSid=sessionId;
+  const target=selectedProfile();
+  if(!oldSid){
+    setState('err','영상 모드 전환 실패','기존 세션 번호가 없어 안전하게 전환할 수 없습니다. 정지 후 다시 시작해 주세요.');
+    return;
+  }
+
+  profileSwitching=true;
+  netManualStop=true;              // block network recovery while intentional switch owns teardown
+  netRecoveryCancel();
+  setProfileControlsDisabled(true);
+  setTuneDisabled(true);
+  setState('','영상 모드 전환',profileShort(target)+' · 기존 연결 종료');
+
+  await cleanup(false);            // PC-FIRST: RTCP/NACK source gone before /stop wait
+  setProfileControlsDisabled(true);
+  setTuneDisabled(true);
+  setState('','영상 모드 전환',profileShort(target)+' · ESP 세션 정리');
+
+  const gone=await profileStopExactSid(oldSid,4200);
+  netManualStop=false;
+  profileSwitching=false;
+
+  if(!gone){
+    setRunning(false);
+    setTuneDisabled(false);
+    setProfileControlsDisabled(false);
+    setState('err','영상 모드 전환 실패','기존 영상 세션 정리가 끝나지 않았습니다. 잠시 후 시작을 눌러 주세요.');
+    return;
+  }
+
+  /* New camera profile deserves its own one-shot 15fps startup recovery. */
+  netCam15RecoveryUsed=false;
+  setState('','영상 모드 전환',profileShort(target)+' · 새 연결 시작');
+  await start();
+}
+
+async function start(initialRetryDepth=0){
+  if(running)return;
+  const relayOnly=!!netForceRelayForNextStart;
+  netForceRelayForNextStart=false;
+  let p=null;
+  let offerPostStarted=false;
+  let offerHttpResponseSeen=false;
+  let semanticNoRetry=false;
+  setTuneDisabled(true);setRunning(true);setState('','시작 중',profileShort(selectedProfile())+(relayOnly?' TURN relay 강제 연결':' STUN + TURN/TLS443 / FULL ICE 연결 준비'));
+  try{
+    pc=new RTCPeerConnection({
+      iceServers:[
+        {urls:WEBRTC_STUN_URL},
+        {urls:WEBRTC_TURN_URL,username:WEBRTC_TURN_USER,credential:WEBRTC_TURN_CREDENTIAL}
+      ],
+      bundlePolicy:'max-bundle',
+      iceTransportPolicy:(relayOnly?'relay':'all')
+    });
+    p=pc;p._ab3PolicyRelayOnly=relayOnly;p._ab3SelectedWasRelay=null;p._ab3EverConnected=false;p._ab4LastNetworkType=netHintNetworkType();
+    pc.addTransceiver('video',{direction:'recvonly'});
+    pc.addTransceiver('audio',{direction:'recvonly'}); /* [CAM-AUDIO-OPUS24K-V4-20260902] */
+    pc.ontrack=e=>{
+      if(e.track.kind==='video'){
+        const v=$('video');v.srcObject=(e.streams&&e.streams[0])?e.streams[0]:new MediaStream([e.track]);
+        $('videoWrap').classList.add('live');
+      }else if(e.track.kind==='audio'){
+        const a=$('remoteAudio');a.srcObject=new MediaStream([e.track]);a.muted=!audioEnabled;
+        if(audioEnabled)a.play().then(()=>{$('stAudio').textContent='ON';}).catch(()=>{
+          audioEnabled=false;a.muted=true;$('btnAudio').textContent='🔇';$('stAudio').textContent='탭하여 소리 켜기';
+        });
+      }
+    };
+    pc.oniceconnectionstatechange=()=>{netPeerStateChanged(p,'ice');};
+    pc.onconnectionstatechange=()=>{
+      if(pc!==p)return;
+      if(p.connectionState==='connected'){
+        p._ab3EverConnected=true; /* [CAM-HANDOVER-PATH-AWARE-AB3-CONNECTED-GATE-FIX2-20260907] */
+        if(p._ab3PolicyRelayOnly===true)p._ab3SelectedWasRelay=true;
+        netClearRecoverTimer();
+        netClearConnectWatchdog();
+        netArmFirstFrameWatchdog(p);
+        setTuneDisabled(false);
+        setState('','연결됨',profileShort(selectedProfile())+' · 첫 영상 확인 중');
+        startStats();
+      }else if(p.connectionState==='disconnected'){
+        setState('','망 전환 중','연결 복구 중...');
+        netPeerStateChanged(p,'conn');
+      }else if(p.connectionState==='failed'){
+        setState('','망 전환 복구','기존 연결 정리 준비');
+        netPeerStateChanged(p,'conn');
+      }
+    };
+    const offer=await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceComplete(pc);
+    offerPostStarted=true;
+    const r=await fetch(API.offer,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode:'A',profile:selectedProfile(),type:'offer',
+        client_token:CAM_CLIENT_TOKEN,esp_relay_only:relayOnly,sdp:sdpForEsp(pc.localDescription.sdp)})});
+    offerHttpResponseSeen=true;
+    if(!r.ok){
+      let code='';try{const e=await r.json();code=e.error||'';}catch(_){}
+      if(code==='max_2_viewers'){semanticNoRetry=true;throw new Error('이미 2명이 영상을 보고 있습니다.');}
+      if(code==='profile_in_use'){semanticNoRetry=true;throw new Error('기존 시청자와 같은 영상 모드(1080p 또는 720p60)를 선택해 주세요.');}
+      if(code==='primary_connecting')throw new Error('첫 번째 영상이 아직 시작 중입니다. 자동으로 한 번 더 시도합니다.');
+      if(code==='session_gate_busy')throw new Error('카메라 세션 정리 중입니다. 자동으로 한 번 더 시도합니다.');
+      if(code==='client_session_active'){semanticNoRetry=true;throw new Error('이 화면의 기존 영상 연결이 아직 활성 상태입니다. 잠시 후 다시 눌러 주세요.');}
+      if(code==='client_orphan_cleanup_deferred')throw new Error('이전 시작 세션 정리 중입니다.');
+      if(r.status===409){semanticNoRetry=true;throw new Error('카메라 연결 작업이 진행 중입니다.');}
+      throw new Error('ESP 응답 오류 HTTP '+r.status);
+    }
+    const j=await r.json();
+    if(!j.sdp)throw new Error('SDP answer 없음');
+    sessionId=+(j.session_id||0);
+    await pc.setRemoteDescription({type:'answer',sdp:j.sdp});
+    netArmConnectWatchdog(p);
+    startStats();
+  }catch(e){
+    const knownSid=sessionId;
+    const canInitialRetry=(
+      initialRetryDepth===0 &&
+      !netRecovering &&
+      !netManualStop &&
+      offerPostStarted &&
+      !semanticNoRetry
+    );
+
+    /* PC-FIRST. If session_id is known, stop exactly that sid. If the HTTP
+     * answer was lost before session_id arrived, stop by this page's exact
+     * client token. This never falls back to anonymous /stop. */
+    await cleanup(false);
+    if(knownSid){
+      await netPostStopSid(knownSid,1800);
+    }else if(offerPostStarted){
+      await netPostStopToken(1800);
+    }
+
+    if(canInitialRetry&&!netManualStop){
+      setState('','초기 연결 자동복구',
+        offerHttpResponseSeen?'이전 시작 세션 정리 후 1회 재시도':'응답이 끊긴 시작 세션 정리 후 1회 재시도');
+      await netSleep(INITIAL_START_RETRY_DELAY_MS);
+      if(!netManualStop&&!netRecovering){
+        await start(1);
+        return;
+      }
+    }
+
+    setState('err','시작 실패',e.message||String(e));
+  }
+}
+async function stop(){
+  netManualStop=true;
+  netRecoveryCancel();
+  if(!running&&!pc){netManualStop=false;return;}
+
+  /* [STOP-PC-FIRST-20260831]
+   * Close the browser PeerConnection BEFORE waiting for ESP /stop.
+   * With TURN, a lossy link can generate an RTCP NACK/resend storm.  The old
+   * order kept the PeerConnection alive while awaiting /stop, so NACK traffic
+   * could continue and delay the very stop request we were waiting for.
+   *
+   * Capture sid first because cleanup() clears sessionId.
+   */
+  const sid=sessionId;
+  setTuneDisabled(true);setState('','정지 중','브라우저 연결 종료');
+
+  /* cleanup(false) is synchronous in practice and closes pc immediately.
+   * Do not show "정지" yet; keep the UI in stopping state until ESP confirms. */
+  await cleanup(false);
+  setTuneDisabled(true);setState('','정지 중','ESP 세션 정리');
+
+  try{
+    const u=API.stop+(sid
+      ?('?sid='+encodeURIComponent(sid))
+      :('?token='+encodeURIComponent(CAM_CLIENT_TOKEN)));
+    await fetch(u,{method:'POST',cache:'no-store',keepalive:true});
+  }catch(_){}
+
+  setTuneDisabled(false);
+  setState('','정지','다시 시작할 수 있습니다.');
+  netManualStop=false;
+}
+async function cleanup(showStopped){
+  netClearConnectWatchdog();netClearFirstFrameWatchdog();stopStats();
+  const old=pc;
+  try{if(old){
+    old.ontrack=null;old.onconnectionstatechange=null;old.oniceconnectionstatechange=null;
+    old.onicegatheringstatechange=null;old.onsignalingstatechange=null;
+    old.close();
+  }}catch(_){}
+  pc=null;
+  sessionId=0;
+  browserFpsReset(null);
+  browserRxReset(null);
+  adaptiveGopBrowserReset(null); /* [CAM-1080-ADAPT-GOP-R2-20260912] */
+  try{const v=$('video');if(v.srcObject){v.srcObject.getTracks().forEach(t=>t.stop());v.srcObject=null;}}catch(_){}
+  try{const a=$('remoteAudio');if(a){a.pause();a.srcObject=null;}}catch(_){}
+  $('stAudio').textContent=audioEnabled?'24k Opus':'OFF';
+  $('videoWrap').classList.remove('live');
+  $('stIce').textContent='-';
+  $('stRx').textContent='-';
+  setRunning(false);setTuneDisabled(false);
+  if(showStopped)setState('','정지','다시 시작할 수 있습니다.');
+}
+/* [CAM-1080-ADAPT-GOP-R2-20260912] Browser is an observer only. The ESP is authoritative.
+ * RX Mbps is displayed/diagnostic; it is NOT treated as available capacity. */
+let adaptSamplePc=null,adaptSamplePrev=null,adaptPairId='',adaptConnState='',adaptIceState='',adaptDtlsState='',adaptFreezeUntil=0;
+let adaptLastSwitches=-1;
+let adaptStatsPollBusy=false;
+function adaptiveGopBrowserReset(p=null){adaptSamplePc=p;adaptSamplePrev=null;adaptPairId='';adaptConnState='';adaptIceState='';adaptDtlsState='';adaptFreezeUntil=0;adaptLastSwitches=-1;}
+async function adaptiveGopStatusQuery(p){
+  if(!p||!sessionId||selectedProfile()!=='1080p')return '';
+  if(adaptSamplePc!==p){adaptiveGopBrowserReset(p);adaptFreezeUntil=Date.now()+5000;}
+  let rep=null,inbound=null,tr=null,pair=null;
+  try{rep=await p.getStats();}catch(_){return '';}
+  rep.forEach(x=>{if(x.type==='inbound-rtp'&&(x.kind==='video'||x.mediaType==='video'))inbound=x;if(!tr&&x.type==='transport')tr=x;});
+  if(tr&&tr.selectedCandidatePairId&&rep.get)pair=rep.get(tr.selectedCandidatePairId)||null;
+  if(!pair)rep.forEach(x=>{if(!pair&&x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded')pair=x;});
+  const pairId=String((pair&&pair.id)||(tr&&tr.selectedCandidatePairId)||'');
+  const cs=String(p.connectionState||''),is=String(p.iceConnectionState||'');
+  let ds='';try{const rr=(p.getReceivers&&p.getReceivers()||[]).find(x=>x&&x.transport);ds=String((rr&&rr.transport&&rr.transport.state)||'');}catch(_){}
+  if(adaptPairId&&pairId&&adaptPairId!==pairId)adaptFreezeUntil=Date.now()+5000;
+  if(adaptConnState&&cs!==adaptConnState)adaptFreezeUntil=Date.now()+5000;
+  if(adaptIceState&&is!==adaptIceState)adaptFreezeUntil=Date.now()+5000;
+  if(adaptDtlsState&&ds&&ds!==adaptDtlsState)adaptFreezeUntil=Date.now()+5000;
+  adaptPairId=pairId||adaptPairId;adaptConnState=cs;adaptIceState=is;if(ds)adaptDtlsState=ds;
+  if(netRecovering||profileSwitching||netManualStop||cs!=='connected'||(is!=='connected'&&is!=='completed')||(ds&&ds!=='connected'))adaptFreezeUntil=Date.now()+5000;
+  const freezeRem=Math.max(0,Math.min(5000,Math.round(adaptFreezeUntil-Date.now())));
+  const freeze=freezeRem>0;
+  let valid=false,bfps=0,lossBp=0,jitMs=0,availK=0,rxK=0;
+  if(inbound){
+    const ts=Number(inbound.timestamp);
+    const frames=Number(inbound.framesDecoded);
+    const recv=Number(inbound.packetsReceived);
+    const lost=Number(inbound.packetsLost);
+    const bytes=Number(inbound.bytesReceived);
+    if(adaptSamplePrev&&Number.isFinite(ts)&&ts>adaptSamplePrev.ts){
+      const dt=ts-adaptSamplePrev.ts;
+      if(dt>=400&&dt<=5000){
+        const df=Number.isFinite(frames)?Math.max(0,frames-adaptSamplePrev.frames):0;
+        const dr=Number.isFinite(recv)?Math.max(0,recv-adaptSamplePrev.recv):0;
+        const dl=Number.isFinite(lost)?Math.max(0,lost-adaptSamplePrev.lost):0;
+        const db=Number.isFinite(bytes)?Math.max(0,bytes-adaptSamplePrev.bytes):0;
+        bfps=Math.max(0,Math.min(24000,Math.round(df*100000/dt)));
+        const packets=dr+dl;lossBp=packets>0?Math.max(0,Math.min(10000,Math.round(dl*10000/packets))):0;
+        rxK=Math.max(0,Math.min(1000000,Math.round(db*8/dt))); /* bytes*8/ms = kbps */
+        valid=true;
+      }
+    }
+    adaptSamplePrev={ts:Number.isFinite(ts)?ts:performance.now(),frames:Number.isFinite(frames)?frames:0,recv:Number.isFinite(recv)?recv:0,lost:Number.isFinite(lost)?lost:0,bytes:Number.isFinite(bytes)?bytes:0};
+    jitMs=Math.max(0,Math.min(10000,Math.round(Number(inbound.jitter||0)*1000)));
+  }
+  const ab=Number(pair&&pair.availableIncomingBitrate);if(Number.isFinite(ab)&&ab>0)availK=Math.min(1000000,Math.round(ab/1000));
+  return '&asid='+encodeURIComponent(sessionId)+'&av='+(valid?'1':'0')+'&afz='+(freeze?'1':'0')+'&afm='+freezeRem+
+    '&af='+bfps+'&al='+lossBp+'&aj='+jitMs+'&ai='+availK+'&ar='+rxK;
+}
+async function pollStats(){if(adaptStatsPollBusy)return;adaptStatsPollBusy=true;try{await pollStatsInner();}finally{adaptStatsPollBusy=false;}}
+function startStats(){if(statsTimer)return;pollStats();statsTimer=setInterval(pollStats,1200);}
+function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=null;}}
+async function pollStatsInner(){
+  let esp=null;
+  let adaptQuery='';
+  try{adaptQuery=await adaptiveGopStatusQuery(pc);}catch(_){adaptQuery='';}
+  try{const r=await fetch(API.status+'?profile='+encodeURIComponent(selectedProfile())+adaptQuery,{cache:'no-store'});if(r.ok)esp=await r.json();}catch(_){}
+  if(esp&&esp.isp_tune&&!tuneManual)setTuneInputs(esp.isp_tune);
+  if(esp&&Number.isFinite(Number(esp.mic_gain_db))){
+    micGainDb=Number(esp.mic_gain_db);
+    $('micGain').value=String(Math.max(0,Math.min(42,Math.round(micGainDb/6)*6)));
+    $('micGainV').textContent='+'+Math.round(micGainDb)+' dB';
+  }
+  if(esp&&esp.camera){
+    const c=esp.camera;
+    const ag=esp.adaptive_gop||null;
+    const qpVal=Number(c.h264_qp??c.fixed_qp??c.qp??c.qp_min);
+    const gopVal=Number((ag&&ag.gop)||c.h264_gop||c.gop);
+    $('stProfile').textContent=(c.profile||profileShort(selectedProfile()));
+    $('stQp').textContent=Number.isFinite(qpVal)&&qpVal>0?String(qpVal):'-';
+    $('stGop').textContent=Number.isFinite(gopVal)&&gopVal>0?String(gopVal):'-';
+    if(ag){const sw=Number(ag.switches||0);if(adaptLastSwitches>=0&&sw!==adaptLastSwitches)adaptSamplePrev=null;adaptLastSwitches=sw;if(sw>0)netCam15RecoveryUsed=true;} /* [CAM-1080-ADAPT-GOP-R2-20260912] */
+    $('stCapture').textContent=((c.capture_fps_x100||0)/100).toFixed(1);
+    $('stEncode').textContent=((c.encode_fps_x100||c.fps_x100||0)/100).toFixed(1);
+    $('stDrop').textContent=String((c.consumer_drops||0)+(esp.media_drop||0));
+    $('stDma').textContent=c.dma_largest?Math.round(c.dma_largest/1024)+'KB':'-';
+    $('stViewers').textContent=String(esp.peer_connected_count||0)+'/'+String(esp.max_peers||2);
+    if(c.last_errno)setState('err','카메라 오류',(c.stage||'')+' errno='+c.last_errno);
+    netMaybeRecoverCameraStartup15fps(esp);
+  }
+  if(pc){
+    try{
+      let inbound=null,pair=null,tr=null,localCand=null;const rep=await pc.getStats();
+      rep.forEach(x=>{
+        if(x.type==='inbound-rtp'&&(x.kind==='video'||x.mediaType==='video'))inbound=x;
+        if(!tr&&x.type==='transport')tr=x;
+      });
+      if(tr&&tr.selectedCandidatePairId&&rep.get)pair=rep.get(tr.selectedCandidatePairId)||null;
+      if(!pair)rep.forEach(x=>{if(!pair&&x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded')pair=x;});
+      if(pair&&pair.localCandidateId&&rep.get)localCand=rep.get(pair.localCandidateId)||null;
+      netAb3RememberSelectedPath(pc,rep,pair);
+      netObserveRelayWifiUpgrade(pc); /* [CAM-RELAY-DIRECT-UPGRADE-AB4-FIX2-20260907] poll authority */
+      if(localCand){
+        const ct=String(localCand.candidateType||'').toLowerCase();
+        const proto=String(localCand.relayProtocol||localCand.protocol||'').toUpperCase();
+        $('stIce').textContent=(ct==='relay'?'TURN':ct==='srflx'?'P2P':ct==='host'?'LAN':(ct||'-').toUpperCase())+(proto?'/'+proto:'');
+      }
+      if(inbound&&(inbound.framesDecoded||0)>0&&netHealthy(pc)){
+        netClearFirstFrameWatchdog(); /* actual decoded frame = media success */
+        if(!netRecovering&&!netManualStop&&!profileSwitching)setProfileControlsDisabled(false);
+        const browserFps=browserFpsFromInbound(pc,inbound);
+        const rxK=browserRxFromInbound(pc,inbound);
+        if(rxK>0)$('stRx').textContent=(rxK/1000).toFixed(2)+'M';
+        setState('ok','LIVE',profileShort(selectedProfile())+
+          (browserFps===null
+            ?' · Browser 측정 중...'
+            :' · Browser '+browserFps.toFixed(1)+' fps'));
+      }
+    }catch(_){}
+  }
+}
+function netMaybeRecoverCameraStartup15fps(esp){
+  if(netCam15RecoveryUsed||netManualStop||netRecovering||!running||!pc||!netHealthy(pc))return;
+  if(!esp||!esp.camera)return;
+  const c=esp.camera;
+  const frames=Number(c.camera_frames||c.encoded||0);
+  const fps=Number(c.capture_fps_x100||0);
+  const dqAvg=Number(c.camera_dq_us_avg||0);
+  const mediaDrop=Number(esp.media_drop||0);
+
+  /* Startup-only window. Bad real logs: ~15fps and dq_avg ~24-29ms.
+   * Healthy real logs: ~25fps and dq_avg usually sub-ms. */
+  if(frames<50||frames>220)return;
+  if(!(fps>0&&fps<2000&&dqAvg>=10000&&mediaDrop===0))return;
+
+  netCam15RecoveryUsed=true;
+  try{console.warn('[CAM-STARTUP-15FPS-RECOVERY-AB1] fire',{frames,fps_x100:fps,dq_us_avg:dqAvg,media_drop:mediaDrop});}catch(_){}
+  setState('','카메라 FPS 자동복구','초기 캡처 지연 감지 · 완전 새 연결 1회 재시도');
+  netRecoverNetwork('camera-startup-15fps').catch(e=>{
+    netRecovering=false;
+    setRunning(false);
+    setTuneDisabled(false);
+    setState('err','연결 오류','카메라 FPS 자동복구 실패 · '+(e&&e.message?e.message:String(e)));
+  });
+}
+function audioUiSync(){
+  const v=Math.max(0,Math.min(100,Number($('webVol').value||100)));
+  webVolume=v;
+  $('webVolV').textContent=v+'%';
+  const a=$('remoteAudio');if(a)a.volume=v/100;
+  try{localStorage.setItem('camWebVol',String(v));}catch(_){}
+
+  const g=Number($('micGain').value||42);
+  micGainDb=g;
+  $('micGainV').textContent='+'+g+' dB';
+}
+async function applyMicGain(g){
+  try{
+    const r=await fetch(API.isp,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mic_gain_db:Number(g)})
+    });
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||('HTTP '+r.status));
+    micGainDb=Number(j.mic_gain_db);
+    $('micGain').value=String(Math.max(0,Math.min(42,Math.round(micGainDb/6)*6)));
+    $('micGainV').textContent='+'+Math.round(micGainDb)+' dB';
+  }catch(e){
+    console.warn('mic gain',e);
+    $('micGainV').textContent='적용 오류';
+  }
+}
+function micGainChanged(){
+  audioUiSync();
+  if(micGainTimer)clearTimeout(micGainTimer);
+  micGainTimer=setTimeout(()=>applyMicGain($('micGain').value),180);
+}
+function toggleAudio(){
+  audioEnabled=!audioEnabled;
+  const a=$('remoteAudio');
+  if(a){
+    a.muted=!audioEnabled;
+    a.volume=webVolume/100;
+    if(audioEnabled)a.play().then(()=>{
+      $('stAudio').textContent='ON';
+    }).catch(()=>{
+      audioEnabled=false;a.muted=true;
+      $('btnAudio').textContent='🔇';
+      $('stAudio').textContent='차단';
+    });
+    else {
+      a.pause();
+      $('stAudio').textContent='OFF';
+    }
+  }
+  $('btnAudio').textContent=audioEnabled?'🔊':'🔇';
+}
+async function fullscreen(){
+  const el=$('videoWrap');
+  try{if(!document.fullscreenElement)await el.requestFullscreen();else await document.exitFullscreen();}catch(_){}
+}
+document.querySelectorAll('input[name="profile"]').forEach(r=>{
+  try{const saved=localStorage.getItem('ha_cam_profile');if(saved===r.value)r.checked=true;}catch(_){}
+  r.addEventListener('change',()=>{
+    try{localStorage.setItem('ha_cam_profile',r.value);}catch(_){}
+    loadTune();
+    loadColor2();
+    if(running&&pc&&!netRecovering&&!netManualStop&&!profileSwitching){
+      switchLiveProfile().catch(e=>{
+        profileSwitching=false;netManualStop=false;setRunning(false);setTuneDisabled(false);setProfileControlsDisabled(false);
+        setState('err','영상 모드 전환 실패',e&&e.message?e.message:String(e));
+      });
+    }
+  });
+});
+$('btnStart').onclick=()=>{netCam15RecoveryUsed=false;start();};$('btnStop').onclick=stop;$('btnFull').onclick=fullscreen;$('btnAudio').onclick=toggleAudio;
+$('webVol').value=String(webVolume);
+$('webVol').oninput=audioUiSync;
+$('micGain').oninput=micGainChanged;
+audioUiSync();
+['sat','gamma','sharp','contrast'].forEach(id=>$(id).addEventListener('input',scheduleTune));
+['hue','wbTemp'].forEach(id=>$(id).addEventListener('input',scheduleColor2));
+function setWbModeUi(mode){
+  const next=(mode==='manual')?'manual':'auto';
+  if($('wbMode').value===next){color2Labels();return;}
+  $('wbMode').value=next;
+  color2Labels();
+  scheduleColor2();
+}
+$('wbAuto').addEventListener('click',()=>setWbModeUi('auto'));
+$('wbManual').addEventListener('click',()=>setWbModeUi('manual'));
+$('btnAutoCal').onclick=run720AutoCalibration;
+$('btnTuneApply').onclick=saveAllTune;
+$('btnTuneReset').onclick=()=>{if(confirm('사용자 화질 조정을 해제하고 카메라 기본 화질로 복귀하시겠습니까?\n\n색조는 0, 화이트밸런스는 AUTO로 돌아가며 H.264/카메라 타이밍은 변경되지 않습니다.'))resetAllTune();};
+tuneLabels();color2Labels();loadTune();loadColor2();
+/* [CAM-NET-HINT-ONLY-20260901]
+ * Browser network events remain HINTS ONLY for DIRECT sessions.
+ *
+ * [CAM-RELAY-DIRECT-UPGRADE-AB4-20260907]
+ * TEST ONLY. One narrow exception is added for an already-selected RELAY path:
+ * when NetworkInformation reports a transition to Wi-Fi, keep the old relay PC
+ * alive for a fixed 800 ms debounce, then create a fresh ALL-policy PC so a
+ * newly available LAN/direct path can win. This is NOT applied to DIRECT PCs,
+ * generic effectiveType/downlink changes, or ordinary offline/online noise.
+ *
+ * Existing recovery authority is otherwise unchanged:
+ *   disconnected -> 0.8 s fixed-deadline grace via netPeerStateChanged()
+ *   failed       -> immediate fresh-PC recovery via netPeerStateChanged()
+ *   fresh ALL failure/timeout -> existing TURN relay-only fallback
+ */
+const NET_RELAY_WIFI_UPGRADE_DEBOUNCE_MS=800;
+let netRelayWifiUpgradeTimer=null;
+
+function netHintNetworkType(){
+  try{
+    const nc=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+    return String((nc&&nc.type)||'').toLowerCase();
+  }catch(_){
+    return '';
+  }
+}
+let netHintLastNetworkType=netHintNetworkType();
+
+function netClearRelayWifiUpgrade(){
+  if(netRelayWifiUpgradeTimer){
+    clearTimeout(netRelayWifiUpgradeTimer);
+    netRelayWifiUpgradeTimer=null;
+  }
+}
+function netCurrentPcWasRelay(p){
+  return !!p&&(p._ab3PolicyRelayOnly===true||p._ab3SelectedWasRelay===true);
+}
+/* [CAM-RELAY-DIRECT-UPGRADE-AB4-FIX2-20260907]
+ * Android/Chrome can update NetworkInformation.type from cellular -> wifi
+ * without dispatching the 'change' event. The existing stats loop already
+ * samples the same NetworkInformation API while a session is healthy, so use
+ * that loop as the authoritative observer. Event callbacks remain only a fast
+ * hint. Per-PC _ab4LastNetworkType is seeded when the PC is created, therefore
+ * a RELAY PC created on cellular still detects Wi-Fi even if Wi-Fi returns
+ * before the first stats sample. */
+function netArmRelayWifiUpgrade(p,reason,prevType,nowType){
+  if(netManualStop||netRecovering||!p||pc!==p||!running)return false;
+  if(!netHealthy(p)||!netCurrentPcWasRelay(p))return false;
+  if(nowType!=='wifi'||prevType==='wifi')return false;
+
+  /* One in-flight debounce per PC. A stats tick must not extend an event-arm. */
+  if(netRelayWifiUpgradeTimer)return true;
+
+  const watched=p;
+  try{console.info('[CAM-RELAY-DIRECT-UPGRADE-AB4-FIX2] arm',{reason,prevType,nowType});}catch(_){}
+  setState('','Wi-Fi 전환 감지','TURN 연결 유지 · Wi-Fi 직접 경로 확인 준비');
+
+  netRelayWifiUpgradeTimer=setTimeout(()=>{
+    netRelayWifiUpgradeTimer=null;
+    if(netManualStop||netRecovering||pc!==watched||!running)return;
+    if(!netHealthy(watched)||!netCurrentPcWasRelay(watched))return;
+    if(netHintNetworkType()!=='wifi')return;
+
+    try{console.info('[CAM-RELAY-DIRECT-UPGRADE-AB4-FIX2] fire',{reason});}catch(_){}
+    setState('','Wi-Fi 직접 연결 전환','기존 TURN 연결을 새 ALL 연결로 교체합니다.');
+    netRecoverNetwork('relay-wifi-upgrade').catch(e=>{
+      netRecovering=false;
+      setRunning(false);
+      setTuneDisabled(false);
+      setState('err','연결 오류','Wi-Fi 직접 경로 자동전환 실패 · '+(e&&e.message?e.message:String(e)));
+    });
+  },NET_RELAY_WIFI_UPGRADE_DEBOUNCE_MS);
+  return true;
+}
+function netObserveRelayWifiUpgrade(p){
+  if(!p||pc!==p)return;
+  const nowType=netHintNetworkType();
+  const prevType=String(p._ab4LastNetworkType||'').toLowerCase();
+
+  if(nowType)p._ab4LastNetworkType=nowType;
+
+  if(prevType==='cellular'&&nowType==='wifi'){
+    netArmRelayWifiUpgrade(p,'stats-cellular-to-wifi',prevType,nowType);
+    return;
+  }
+
+  /* If Wi-Fi disappeared before the debounce fired, cancel the proactive path. */
+  if(nowType&&nowType!=='wifi')netClearRelayWifiUpgrade();
+}
+function netNetworkHint(reason){
+  if(netManualStop||netRecovering)return;
+
+  /* A route change can make the previous FPS sample window meaningless. */
+  if(pc)browserFpsReset(pc);
+
+  const p=pc;
+  const prevType=netHintLastNetworkType;
+  const nowType=netHintNetworkType();
+  if(nowType)netHintLastNetworkType=nowType;
+
+  /* Event path is only a fast hint in FIX2. Polling is authoritative. */
+  if(p&&nowType)p._ab4LastNetworkType=nowType;
+  const wifiArrival=(
+    (reason==='network-change'||reason==='online') &&
+    nowType==='wifi' &&
+    prevType!=='wifi'
+  );
+
+  if(wifiArrival&&netArmRelayWifiUpgrade(p,reason,prevType,nowType))return;
+
+  if(nowType&&nowType!=='wifi')netClearRelayWifiUpgrade();
+
+  /* Presentation only for every other network hint. */
+  if(p&&running&&!netHealthy(p)){
+    setState('','망 전환 감지','WebRTC 연결 상태 확인 중...');
+  }
+}
+
+try{
+  const nc=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+  if(nc&&nc.addEventListener){
+    nc.addEventListener('change',()=>netNetworkHint('network-change'));
+  }
+}catch(_){}
+window.addEventListener('offline',()=>netNetworkHint('offline'));
+window.addEventListener('online',()=>netNetworkHint('online'));
+window.addEventListener('pagehide',()=>{netManualStop=true;netRecoveryCancel();if(pc||running){
+  /* [CAM-PAGEHIDE-STOP-BEACON-A1-20260908]
+   * A reload/navigation can abort fetch keepalive before ESP sees /stop.
+   * sendBeacon is purpose-built for unload POST delivery; fall back to the
+   * existing keepalive fetch.  The request is still exact sid/token scoped. */
+  try{
+    const u=API.stop+(sessionId
+      ?('?sid='+encodeURIComponent(sessionId))
+      :('?token='+encodeURIComponent(CAM_CLIENT_TOKEN)));
+    let beaconed=false;
+    try{if(navigator.sendBeacon)beaconed=navigator.sendBeacon(u,new Blob([],{type:'text/plain'}));}catch(_){}
+    if(!beaconed)fetch(u,{method:'POST',cache:'no-store',keepalive:true});
+  }catch(_){}
+  cleanup(false);
+}});
+</script>
+</body>
+</html>
