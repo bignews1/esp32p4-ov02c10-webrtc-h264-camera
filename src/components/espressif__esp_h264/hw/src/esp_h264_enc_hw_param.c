@@ -10,20 +10,23 @@
 #include "esp_private/esp_cache_private.h"
 #include "esp_h264_enc_hw_param.h"
 
-/* [REF-PERSIST-R2 2026-09-12]
- * TEST-ONLY: reserve one 1920-wide H.264 reference buffer in INTERNAL memory
- * at network GOT_IP, after ESP-Hosted/SDIO is alive but before camera services
- * start. The block is large enough for both 1920x1080 (~138KB) and
- * 1288x728 (~93KB), is reused across camera stop/start and profile switches,
- * and is never returned until reboot.
+/* [STABLE-H264-MEMORY-MAP 2026-09-20]
+ * CURRENT KNOWN-GOOD MEMORY CONTRACT. Do not simplify these pools merely
+ * because two of them can hold an H.264 reference frame.
  *
- * Both 720p and 1080p GOP5 may use this persistent INTERNAL reference. The
- * existing PSRAM reference pool remains the fail-safe fallback if reservation
- * is unavailable or the persistent block is unexpectedly busy.
+ * 1) INTERNAL persistent reference (~138 KiB): reserved early, reused by
+ *    720/1080, normally owns the active HW reference, and stays until reboot.
+ * 2) PSRAM reference pool (~138 KiB): staging/fail-safe allocation. It
+ *    intentionally coexists with the INTERNAL reference. The R24 cleanup that
+ *    removed it reproduced 720->1080 camera REQBUFS ENOMEM and was reverted.
+ *    Keep it unless a separate A/B test proves a replacement safe.
+ * 3) PSRAM persistent DB (~3.13 MiB, R23): large de-blocking workspace reused
+ *    across sessions; do not move it back to INTERNAL/DMA.
+ * 4) INTERNAL/DMA small pool (20 KiB, R3B): db_tmp/descriptors only; avoids
+ *    small-object DMA heap churn.
  *
- * Reservation is fail-safe. Both DMA total free and one DMA-capable contiguous
- * block must cover 1080 ref_need + the protected reserve, and post-allocation
- * DMA headroom is rechecked.
+ * Historical AB/R2/R3B/R23 symbol and log names are retained for continuity;
+ * they do not mean the current paths are disposable test code.
  */
 #ifndef HA_H264_REF_720_INTERNAL_ABTEST
 #define HA_H264_REF_720_INTERNAL_ABTEST 1
@@ -57,6 +60,7 @@ typedef struct esp_h264_param {
     uint32_t                   mvm_buf_len;
     uint8_t                   *db;
     uint8_t                   *ref;
+    bool                       db_from_psram_persist; /* [H264-DB-PSRAM-PERSIST-R23] never free per encoder */
     bool                       ref_from_pool; /* PSRAM shared ref pool */
     bool                       ref_from_internal_persist; /* [REF-PERSIST-R2] never free per encoder */
     h264_dma_desc_t           *dsc_ref;
@@ -292,29 +296,39 @@ static int max_refame_buffer_size(int16_t mb_width)
     return H264_DMA_3_LINES * H264_DMA_MACRO_SIZE * (H264_DMA_MACRO_SIZE + H264_DMA_HALF_MACRO_SIZE) * mb_width + HW_DMA_BUF_ALIGN_SIZE;
 }
 
-/* [REF-POOL-1.3.0][REF-PSRAM AB1] Shared PSRAM reference-frame pool.
- * Reserved lazily for the maximum supported width and reused by each encoder
- * instance. R2 keeps it as the fail-safe path if INTERNAL persistence is not
- * available.
+/* PSRAM reference staging/fail-safe pool.
+ * This pool is part of the current stable baseline even though the encoder
+ * normally swaps to the INTERNAL persistent reference before DMA setup.
+ * The historical [REF-PSRAM AB1] log name is intentionally kept unchanged.
  */
 static uint8_t  *s_ref_pool = NULL;
 static uint32_t  s_ref_pool_size = 0;
 static bool      s_ref_pool_busy = false;
 
-/* [REF-PERSIST-R2] Dedicated 1080-capable INTERNAL reference buffer.
- * Lifetime is boot -> reboot. One camera encoder at a time may use it at either
- * 720p or 1080p; the PSRAM pool above remains the fail-safe fallback. */
+/* 1080-capable INTERNAL persistent reference.
+ * Lifetime is reserve -> reboot. One encoder at a time owns it; the PSRAM
+ * reference pool above remains available as staging/fail-safe memory. */
 static uint8_t  *s_ref_internal_persist = NULL;
 static uint32_t  s_ref_internal_persist_size = 0;
 static bool      s_ref_internal_persist_busy = false;
 
+/* [H264-DB-PSRAM-PERSIST-R23 2026-09-20]
+ * Production-stable large de-blocking workspace. Reserve one 1920x1080-capable
+ * block in PSRAM and reuse it across 720/1080 sessions. This avoids repeated
+ * multi-megabyte allocations during profile handover and must not consume
+ * INTERNAL/DMA heap memory. */
+static uint8_t  *s_db_psram_persist = NULL;
+static uint32_t  s_db_psram_persist_size = 0;
+static bool      s_db_psram_persist_busy = false;
+static bool      s_db_psram_reserve_attempted = false;
 
-/* [H264-WEB20-PERSIST-R3B] Separate 20KiB INTERNAL/DMA pool for H.264's
- * short-lived db_tmp and DMA descriptor objects.  This is intentionally a
- * separate allocation from the ~138KiB reference frame: the system never
- * needs one 160KiB contiguous hole.  The pool is boot-persistent and is reset
- * by offset between encoder sessions, so H.264 small-object churn does not
- * fragment the global DMA heap. */
+static bool h264_db_psram_persist_reserve_once(void);
+
+
+/* [H264-WEB20-PERSIST-R3B] 20 KiB INTERNAL/DMA small-object pool.
+ * Used only for db_tmp and DMA descriptors. It is deliberately separate from
+ * the ~138 KiB reference allocation, remains allocated across sessions, and
+ * resets only its offset so small H.264 objects do not fragment global DMA. */
 #define H264_SMALL_PERSIST_BYTES        (20U * 1024U)
 #define H264_SMALL_PERSIST_ALIGN        16U
 #define H264_PERSIST_PROTECT_BYTES      ((uint32_t)HA_H264_REF_720_DMA_RESERVE_BYTES)
@@ -491,12 +505,11 @@ esp_h264_err_t esp_h264_enc_hw_ref_pool_reserve(uint16_t max_width)
     const uint32_t need = (uint32_t)max_refame_buffer_size(mb_width);
     uint32_t actual_size = 0;
 
-    /* v1.3.0 uses aligned_calloc for param->ref. Keep identical zero-init
-     * semantics for the persistent pool.
+    /* Preserve calloc-style zero initialization for the PSRAM staging pool.
+     * Allocation order here is part of the current stable memory layout.
      */
-    /* [REF-PSRAM AB1] Keep the ~138KB persistent reference frame in PSRAM.
-     * ESP32-P4 H.264 has a dedicated external-memory reference DMA path; keep
-     * all DMA descriptors and db_tmp allocations unchanged in INTERNAL. */
+    /* Historical [REF-PSRAM AB1] name is retained. This PSRAM reference is
+     * staging/fail-safe memory; descriptors and db_tmp remain INTERNAL/DMA. */
     uint8_t *pool = (uint8_t *)esp_h264_aligned_calloc(16, 1, need, &actual_size, ESP_H264_MEM_SPIRAM);
     if (pool == NULL) {
         ESP_H264_LOGE(TAG, "[REF-POOL] reserve failed max_width=%u need=%u",
@@ -520,10 +533,13 @@ esp_h264_err_t esp_h264_enc_hw_ref_persist_reserve(void)
 #else
     if (s_ref_internal_persist != NULL) {
         (void)h264_small_persist_reserve_once();
+        (void)h264_db_psram_persist_reserve_once();
         ESP_H264_LOGI(TAG,
-                      "[REF-PERSIST-R3B] reserve already-ready ref=%u small=%u ptr=%p",
+                      "[REF-PERSIST-R3B] reserve already-ready ref=%u small=%u db_psram=%u ptr=%p",
                       (unsigned)s_ref_internal_persist_size,
-                      (unsigned)s_h264_small_persist_size, (void *)s_ref_internal_persist);
+                      (unsigned)s_h264_small_persist_size,
+                      (unsigned)s_db_psram_persist_size,
+                      (void *)s_ref_internal_persist);
         return ESP_H264_ERR_OK;
     }
 
@@ -576,12 +592,14 @@ esp_h264_err_t esp_h264_enc_hw_ref_persist_reserve(void)
     s_ref_internal_persist_size = actual_size;
     s_ref_internal_persist_busy = false;
     const bool small_ok = h264_small_persist_reserve_once();
+    const bool db_ok = h264_db_psram_persist_reserve_once();
     const size_t final_free = heap_caps_get_free_size(dma_caps);
     const size_t final_largest = heap_caps_get_largest_free_block(dma_caps);
     ESP_H264_LOGI(TAG,
-                  "[REF-PERSIST-R3B] reserve ref_need=%u ref_actual=%u small=%u small_ok=%u protect=%u dma_pre=%u/%u dma_final=%u/%u ptr=%p decision=RESERVED",
+                  "[REF-PERSIST-R3B] reserve ref_need=%u ref_actual=%u small=%u small_ok=%u db_psram=%u db_ok=%u protect=%u dma_pre=%u/%u dma_final=%u/%u ptr=%p decision=RESERVED",
                   (unsigned)ref_need, (unsigned)actual_size,
                   (unsigned)s_h264_small_persist_size, small_ok ? 1U : 0U,
+                  (unsigned)s_db_psram_persist_size, db_ok ? 1U : 0U,
                   (unsigned)reserve,
                   (unsigned)pre_free, (unsigned)pre_largest,
                   (unsigned)final_free, (unsigned)final_largest, (void *)pool);
@@ -589,11 +607,10 @@ esp_h264_err_t esp_h264_enc_hw_ref_persist_reserve(void)
 #endif
 }
 
-/* [REF-POOL-HANDOVER AB1 2026-09-06]
- * Temporarily return the persistent ~138KB ref pool while no encoder
- * owns it.  The existing lazy reserve path reacquires it on the next H.264
- * encoder creation, after the new WebRTC transport has become ready.
- * Never free while s_ref_pool_busy is true. */
+/* PSRAM reference-pool release used only when no encoder owns the pool.
+ * The next encoder creation lazily reserves it again. The historical
+ * REF-POOL-HANDOVER log name is retained. Never free while pool_busy=true.
+ * This lifecycle is part of the known-good pre-R24 behavior. */
 bool esp_h264_enc_hw_ref_pool_release(void)
 {
     if (s_ref_pool == NULL) {
@@ -627,6 +644,42 @@ static int max_db_buffer_size(int16_t mb_width, int16_t mb_height)
                       + mb_width * (H264_DMA_DB_12_LINES_ROW_LENGTH + H264_DMA_DB_4_LINES_ROW_LENGTH)
                       + mb_width * (mb_height - 1) * H264_DMA_DB_4_LINES_ROW_LENGTH;
     return buffer_size + ((HW_DMA_BUF_ALIGN_SIZE + 1) << 1);
+}
+
+static bool h264_db_psram_persist_reserve_once(void)
+{
+    if (s_db_psram_persist != NULL) {
+        return true;
+    }
+    if (s_db_psram_reserve_attempted) {
+        return false;
+    }
+    s_db_psram_reserve_attempted = true;
+
+    const int16_t max_mb_width = (int16_t)((1920U + 15U) >> 4);
+    const int16_t max_mb_height = (int16_t)((1080U + 15U) >> 4);
+    const uint32_t need = (uint32_t)max_db_buffer_size(max_mb_width, max_mb_height);
+    uint32_t actual_size = 0;
+
+    /* PSRAM only. Never fall back to INTERNAL here: DB is the large,
+     * non-essential-to-INTERNAL working set that previously fragmented or
+     * exhausted the heap during 720->1080 handover. */
+    uint8_t *pool = (uint8_t *)esp_h264_aligned_calloc(
+        16, 1, need, &actual_size, ESP_H264_MEM_SPIRAM);
+    if (pool == NULL) {
+        ESP_H264_LOGE(TAG,
+                      "[H264-DB-PSRAM-PERSIST-R23] reserve failed max=1920x1080 need=%u",
+                      (unsigned)need);
+        return false;
+    }
+
+    s_db_psram_persist = pool;
+    s_db_psram_persist_size = actual_size;
+    s_db_psram_persist_busy = false;
+    ESP_H264_LOGI(TAG,
+                  "[H264-DB-PSRAM-PERSIST-R23] reserve max=1920x1080 need=%u actual=%u ptr=%p decision=RESERVED",
+                  (unsigned)need, (unsigned)actual_size, (void *)pool);
+    return true;
 }
 
 static void cfg_dsc(h264_dma_desc_t *dsc, uint8_t en_2d, uint8_t mode, uint16_t vb, uint16_t hb, uint8_t eof, uint8_t owner, uint16_t va, uint16_t ha, uint8_t *buf, h264_dma_desc_t *next_dsc)
@@ -664,7 +717,16 @@ esp_h264_err_t esp_h264_enc_hw_del_param(esp_h264_enc_param_hw_handle_t handle)
             param->ref_from_internal_persist = false;
         }
         if (param->db) {
-            esp_h264_free(param->db);
+            if (param->db_from_psram_persist) {
+                s_db_psram_persist_busy = false;
+                ESP_H264_LOGI(TAG,
+                              "[H264-DB-PSRAM-PERSIST-R23] release ownership pool=%u free=0",
+                              (unsigned)s_db_psram_persist_size);
+            } else {
+                esp_h264_free(param->db);
+            }
+            param->db = NULL;
+            param->db_from_psram_persist = false;
         }
         if (param->dsc_ref && !esp_h264_enc_hw_small_persist_owns(param->dsc_ref)) {
             esp_h264_free(param->dsc_ref);
@@ -728,7 +790,7 @@ esp_h264_err_t esp_h264_enc_hw_new_param(esp_h264_enc_hw_param_cfg_t *cfg, esp_h
 
     /** Allocated reference frame and DB memory */
     const uint32_t ref_need = (uint32_t)max_refame_buffer_size(param->mb_width);
-    /* [REF-POOL-LAZY] ISP/IPA has initialized before this natural ref allocation point. */
+    /* Lazy PSRAM staging-pool reserve. Keep this allocation point/order stable. */
     if (s_ref_pool == NULL) {
         esp_h264_err_t lazy_ret = esp_h264_enc_hw_ref_pool_reserve(1920);
         ESP_H264_LOGI(TAG, "[REF-POOL-LAZY] first encoder reserve ret=%d ref_need=%u pool=%u",
@@ -752,7 +814,34 @@ esp_h264_err_t esp_h264_enc_hw_new_param(esp_h264_enc_hw_param_cfg_t *cfg, esp_h
         param->ref_from_pool = false;
     }
     ESP_H264_GOTO_ON_FALSE(param->ref, ESP_H264_ERR_MEM, __exit__, TAG, "No memory for reference frame");
-    param->db = (uint8_t *)esp_h264_calloc_prefer(1, max_db_buffer_size(param->mb_width, param->mb_height), &actual_size, ESP_H264_MEM_INTERNAL, ESP_H264_MEM_SPIRAM);
+    const uint32_t db_need = (uint32_t)max_db_buffer_size(param->mb_width, param->mb_height);
+    if (s_db_psram_persist == NULL) {
+        (void)h264_db_psram_persist_reserve_once();
+    }
+    if (s_db_psram_persist != NULL && !s_db_psram_persist_busy &&
+        db_need <= s_db_psram_persist_size) {
+        memset(s_db_psram_persist, 0, db_need);
+        esp_h264_cache_check_and_writeback(s_db_psram_persist, db_need);
+        param->db = s_db_psram_persist;
+        param->db_from_psram_persist = true;
+        s_db_psram_persist_busy = true;
+        actual_size = s_db_psram_persist_size;
+        ESP_H264_LOGI(TAG,
+                      "[H264-DB-PSRAM-PERSIST-R23] acquire %ux%u need=%u pool=%u decision=PERSIST-REUSE",
+                      (unsigned)param->width, (unsigned)param->height,
+                      (unsigned)db_need, (unsigned)s_db_psram_persist_size);
+    } else {
+        /* Fail-safe is still PSRAM-only. Do not consume/fragment INTERNAL for
+         * this multi-megabyte DB working set. */
+        param->db = (uint8_t *)esp_h264_aligned_calloc(
+            16, 1, db_need, &actual_size, ESP_H264_MEM_SPIRAM);
+        param->db_from_psram_persist = false;
+        ESP_H264_LOGI(TAG,
+                      "[H264-DB-PSRAM-PERSIST-R23] acquire %ux%u need=%u pool=%u busy=%u decision=TRANSIENT-PSRAM",
+                      (unsigned)param->width, (unsigned)param->height,
+                      (unsigned)db_need, (unsigned)s_db_psram_persist_size,
+                      s_db_psram_persist_busy ? 1U : 0U);
+    }
     ESP_H264_GOTO_ON_FALSE(param->db, ESP_H264_ERR_MEM, __exit__, TAG, "No memory for data");
 
     /** Allocated descriptor memory. R3 takes these tiny DMA objects from the
@@ -811,11 +900,10 @@ __exit__:
     return ret;
 }
 
-/* [REF-PERSIST-R2]
- * Called after the encoder's normal INTERNAL buffers/descriptors are ready.
- * The 1080-capable reference was reserved earlier at GOT_IP, so this function
- * only swaps ownership from the temporary PSRAM pool to the persistent block;
- * it performs no large allocation on normal camera start.
+/* Switch the encoder reference from the PSRAM staging pool to the
+ * pre-reserved INTERNAL persistent reference after other INTERNAL/DMA objects
+ * are ready. Normal camera start performs no large INTERNAL allocation here.
+ * Historical function name is retained for compatibility.
  */
 bool esp_h264_enc_hw_ref_720_internal_abtest(esp_h264_enc_param_hw_handle_t handle)
 {
@@ -884,7 +972,7 @@ bool esp_h264_enc_hw_ref_720_internal_abtest(esp_h264_enc_param_hw_handle_t hand
     const size_t dma_free_now = heap_caps_get_free_size(dma_caps);
     const size_t dma_largest_now = heap_caps_get_largest_free_block(dma_caps);
     ESP_H264_LOGI(TAG,
-                  "[REF-PERSIST-R3B] %ux%u need=%u persistent=%u small=%u dma_now=%u/%u decision=INTERNAL-PERSIST",
+                  "[REF-PERSIST-R3B] %ux%u need=%u persistent=%u small=%u dma_now=%u/%u decision=INTERNAL-PERSIST-REUSE",
                   (unsigned)param->width, (unsigned)param->height,
                   (unsigned)ref_need, (unsigned)s_ref_internal_persist_size,
                   (unsigned)s_h264_small_persist_size,

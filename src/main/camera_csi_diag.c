@@ -17,6 +17,7 @@
 #include "bsp/esp32_p4_function_ev_board.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"      /* [CAM-DMA-OWNER-TRACE-R1] EXT_RAM_BSS_ATTR */
 #if CONFIG_HEAP_TRACING_STANDALONE
 #include "esp_heap_trace.h"
 #endif
@@ -43,11 +44,21 @@
 #include "lvgl.h"
 
 #include "lcd_ui.h"
+#include "face_ai_tap.h"
 
 /* Production log quiet switch. Set to 1 temporarily when deep diagnostics are needed. */
 #ifndef HA_VERBOSE_DIAG_LOGS
 #define HA_VERBOSE_DIAG_LOGS 0
 #endif
+#include "log_diag_policy.h" /* [LOG-COMPACT-R1-20261003] output policy only */
+
+#define CAM_DMA_DIAG(...) \
+    do { if (HA_LOG_DIAG_DMA_VERBOSE) { ESP_LOGW(TAG, __VA_ARGS__); } } while (0)
+#define CAM_DETAIL_DIAG(...) \
+    do { if (HA_LOG_DIAG_CAMERA_VERBOSE) { ESP_LOGW(TAG, __VA_ARGS__); } } while (0)
+#define CAM_DETAIL_INFO(...) \
+    do { if (HA_LOG_DIAG_CAMERA_VERBOSE) { ESP_LOGI(TAG, __VA_ARGS__); } } while (0)
+
 
 #if !CONFIG_CAMERA_OV02C10
 #error "camera_csi_diag requires CONFIG_CAMERA_OV02C10=y"
@@ -59,12 +70,13 @@
 
 static const char *TAG = "CAM_CSI";
 
-/* [ISP-LIFECYCLE-C12A 2026-08-27]
- * Profile-split A/B.  1080p keeps the C10A EARLY full-controller restart that
- * is stable on hardware.  Native 720p60 deliberately skips that restart and
- * instead uses the previously-working post-S_FMT four-field software resync.
- * Keep these A/B-only hooks private to this diagnostic module. */
-extern esp_err_t esp_video_isp_pipeline_full_restart_for_ab(void);
+/* [ISP-RESIDENT-1080-R12F4-20260919]
+ * Resident-controller A/B.  After the first esp_video/ISP controller init,
+ * BOTH 720p and 1080p keep that controller resident across profile switches.
+ * Native 720 uses the existing post-S_FMT geometry/four-field resync.
+ * A returning 1080 profile now uses the same no-reopen geometry/four-field
+ * resync first, followed by the already-proven 1080 fresh-IPA-only step.
+ * No controller/camera/metadata fd is closed/reopened by this profile switch. */
 extern esp_err_t esp_video_isp_pipeline_720_resync_for_c12a(void);
 extern esp_err_t esp_video_isp_pipeline_fresh_ipa_for_c12c_1080(void);
 
@@ -97,7 +109,7 @@ static void camera_color_diag_log_build_config(void)
 #else
     const int isp_video_device = 0;
 #endif
-    ESP_LOGW(TAG,
+    CAM_DETAIL_DIAG(
              "[COLOR-DIAG] build ISP_PIPELINE_CONTROLLER=%d ISP_VIDEO_DEVICE=%d "
              "(controller=0 means no automatic IPA AE/AWB/CCM updates)",
              pipeline_controller, isp_video_device);
@@ -106,11 +118,11 @@ static void camera_color_diag_log_build_config(void)
 static void camera_color_diag_log_sensor_isp_info(const esp_cam_sensor_format_t *fmt)
 {
     if (!fmt || !fmt->isp_info) {
-        ESP_LOGW(TAG, "[COLOR-DIAG] sensor isp_info=NULL; Bayer/ISP metadata unavailable");
+        CAM_DETAIL_DIAG("[COLOR-DIAG] sensor isp_info=NULL; Bayer/ISP metadata unavailable");
         return;
     }
     const esp_cam_sensor_isp_info_t *isp = fmt->isp_info;
-    ESP_LOGW(TAG,
+    CAM_DETAIL_DIAG(
              "[COLOR-DIAG] sensor ISP meta bayer=%s(%d) pclk=%u vts=%u hts=%u "
              "tline_ns=%u gain_def=%u exp_def=%u",
              camera_color_diag_bayer_name((int)isp->isp_v1_info.bayer_type),
@@ -154,6 +166,18 @@ typedef struct {
     uint64_t u_abs_sum;
     uint64_t v_abs_sum;
     uint32_t y_hist[256];
+    uint32_t y_clip_low_count;
+    uint32_t y_clip_high_count;
+    uint32_t neutral_count;
+    uint64_t neutral_u_sum;
+    uint64_t neutral_v_sum;
+    struct {
+        uint32_t y_count;
+        uint32_t uv_count;
+        uint64_t y_sum;
+        uint64_t u_sum;
+        uint64_t v_sum;
+    } zone[9];
 } camera_ouyy_diag_stats_t;
 
 /* [CAM-AUTO-COLOR-CAL-R1-20260910]
@@ -253,6 +277,8 @@ static inline void camera_ouyy_diag_add_y(camera_ouyy_diag_stats_t *st,
 {
     st->y_sum += yy;
     st->y_hist[yy]++;
+    if (yy <= 10U) st->y_clip_low_count++;
+    if (yy >= 245U) st->y_clip_high_count++;
     st->y_count++;
 }
 
@@ -321,6 +347,36 @@ static bool camera_ouyy_diag_measure(const uint8_t *frame,
             const uint8_t y_o0 = row_odd[off + 1U];
             const uint8_t y_o1 = row_odd[off + 2U];
 
+            /* [CAM-AUTOCAL-SPATIAL-R1-20260918]
+             * Retain the existing sparse walk, but also accumulate a fixed
+             * 3x3 grid. This is stack-only arithmetic over the live frame:
+             * no frame copy and no DMA/heap/PSRAM allocation. */
+            uint32_t zx = ((x - x0) * 3U) / rw;
+            uint32_t zy = ((y - y0) * 3U) / rh;
+            if (zx > 2U) zx = 2U;
+            if (zy > 2U) zy = 2U;
+            const uint32_t zi = zy * 3U + zx;
+            const uint32_t y4 = (uint32_t)y_e0 + y_e1 + y_o0 + y_o1;
+            st.zone[zi].y_sum += y4;
+            st.zone[zi].y_count += 4U;
+            st.zone[zi].u_sum += u;
+            st.zone[zi].v_sum += v;
+            st.zone[zi].uv_count++;
+
+            /* A neutral candidate must be neither crushed nor clipped and
+             * have low chroma in the post-ISP output. R/B and WB optimize
+             * this population instead of cancelling coloured objects in one
+             * whole-frame average. */
+            const uint32_t y_avg = (y4 + 2U) / 4U;
+            const int du = (int)u - 128;
+            const int dv = (int)v - 128;
+            if (y_avg >= 24U && y_avg <= 235U &&
+                (du * du + dv * dv) <= (14 * 14)) {
+                st.neutral_u_sum += u;
+                st.neutral_v_sum += v;
+                st.neutral_count++;
+            }
+
             st.v_sum += v;
             st.v_count++;
             {
@@ -356,6 +412,28 @@ static bool camera_ouyy_diag_measure(const uint8_t *frame,
     out->y_p10 = camera_ouyy_diag_percentile(st.y_hist, st.y_count, 10);
     out->y_p50 = camera_ouyy_diag_percentile(st.y_hist, st.y_count, 50);
     out->y_p90 = camera_ouyy_diag_percentile(st.y_hist, st.y_count, 90);
+    out->y_p95 = camera_ouyy_diag_percentile(st.y_hist, st.y_count, 95);
+    out->y_clip_low_bp = (uint16_t)(((uint64_t)st.y_clip_low_count * 10000U +
+                                     st.y_count / 2U) / st.y_count);
+    out->y_clip_high_bp = (uint16_t)(((uint64_t)st.y_clip_high_count * 10000U +
+                                      st.y_count / 2U) / st.y_count);
+    out->neutral_count = st.neutral_count;
+    if (st.neutral_count > 0U) {
+        out->neutral_u_mean = (float)((double)st.neutral_u_sum / st.neutral_count);
+        out->neutral_v_mean = (float)((double)st.neutral_v_sum / st.neutral_count);
+    }
+    for (uint32_t i = 0; i < 9U; ++i) {
+        if (st.zone[i].y_count > 0U) {
+            out->zone_y_mean[i] =
+                (float)((double)st.zone[i].y_sum / st.zone[i].y_count);
+        }
+        if (st.zone[i].uv_count > 0U) {
+            out->zone_u_mean[i] =
+                (float)((double)st.zone[i].u_sum / st.zone[i].uv_count);
+            out->zone_v_mean[i] =
+                (float)((double)st.zone[i].v_sum / st.zone[i].uv_count);
+        }
+    }
 
     if (roi_name_out) *roi_name_out = roi_name;
     if (x0_out) *x0_out = x0;
@@ -606,7 +684,7 @@ typedef struct {
 } camera_live_profile_cfg_t;
 
 static const camera_live_profile_cfg_t s_cam_live_profiles[] = {
-    { CAMERA_H264_PROFILE_1080P,      "1080p",      1920U, 1080U, 30U, 2U, 5U, 4000000U, 35U, "streaming_1080p_gop5_qp35_prod" },
+    { CAMERA_H264_PROFILE_1080P,      "1080p",      1920U, 1080U, 30U, 2U, 15U, 4000000U, 32U, "streaming_1080p_qp32_gop15_lte" },
     { CAMERA_H264_PROFILE_720P_NATIVE,"720p60-native",1288U,  728U, 60U, 2U, 8U, 4000000U, 39U, "streaming_720p60_native_gop8_qp39_prod" },
 };
 
@@ -615,7 +693,8 @@ static camera_h264_profile_t s_live_profile_selected = CAMERA_H264_PROFILE_1080P
 /* [CAM-1080-ADAPT-GOP-R2-20260912] Conservative start: 1080 begins at GOP5 and may probe GOP1 only
  * when the ESP-authoritative network controller proves enough headroom.
  * [CAM-720-QP39-GOP8-PROD-FINAL-R1-20260913] 720 stays fixed at production GOP8. */
-static uint32_t s_live_1080_gop_selected = 5U;
+static uint32_t s_live_1080_qp_selected = 32U;
+static uint32_t s_live_1080_gop_selected = 15U;
 
 static const camera_live_profile_cfg_t *camera_live_profile_cfg(camera_h264_profile_t id)
 {
@@ -664,6 +743,355 @@ static size_t dma_largest(void)
 static size_t psram_free(void)
 {
     return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+}
+
+/* [CAM-PSRAM-FRAG-DIAG-R1 2026-10-03]
+ * Diagnostic only: inspect PSRAM free-block topology around camera REQBUFS.
+ * 1080p YU12 needs one contiguous 1920*1080*3/2 = 3,110,400-byte block
+ * per capture buffer.  CAM_CSI_BUFFER_COUNT remains unchanged (3).
+ *
+ * The heap walker callback performs no logging and no allocation/free.  It
+ * only accumulates counters and the six largest free blocks on the caller's
+ * stack; logging happens after heap_caps_walk() returns.
+ */
+#define CAM_PSRAM_1080_YU12_BLOCK_BYTES ((size_t)3110400U)
+/* [CAM-1080-PSRAM-BRIDGE-R1-20261004]
+ * The allocator-sequence diagnostic proved the recurring failure only needs
+ * one additional future-fit 1080 camera hole, not three permanent holes and
+ * not an 11.6 MB dead reservation:
+ *
+ *   fragmented failure topology commonly retains ~6.0 MB + ~4.9 MB, which
+ *   can hold only two 3,110,400-byte camera capture buffers.  A protected
+ *   3,211,264-byte bridge supplies the third camera buffer.  After the three
+ *   camera buffers are placed, the ~6.0 MB hole still leaves ~2.9 MB, enough
+ *   for the measured 2,073,600-byte encoder CAPTURE allocation.
+ *
+ * The bridge is acquired early and remains held through 720 operation so
+ * small long-lived PSRAM users cannot consume that future-fit hole.  It is
+ * released only immediately before a 1080 camera VIDIOC_REQBUFS.  After a
+ * 1080 generation releases all V4L2 queues, one bridge is reacquired.
+ *
+ * Compared with the rejected GUARD-R1 experiment, this reserves only one
+ * 3.21 MB block (not three / ~9.63 MB), so a failed 1080 cannot starve the
+ * following 720 stream.  No BUFFER_COUNT, REQBUFS order, H.264 controls,
+ * ISP/AE, WebRTC/TURN/ICE, internal DMA policy, or FaceAI behavior changes.
+ * Reservation failure is fail-open. */
+#define CAM_PSRAM_1080_FIT_BYTES          ((size_t)3175936U)
+#define CAM_PSRAM_1080_BRIDGE_BYTES       ((size_t)3211264U)
+#define CAM_PSRAM_FRAG_TOP_N 6U
+
+static void *s_psram_1080_bridge;
+
+/* [CAM-1080-USERPTR-ARENA-R1-20261004]
+ * Structural fix for recurring 1080 camera REQBUFS ENOMEM.
+ *
+ * Problem: V4L2_MEMORY_MMAP makes esp_video allocate three 3,110,400-byte
+ * camera elements from the shared PSRAM heap on every generation. Repeated
+ * profile/session activity can leave plenty of total PSRAM but fewer than
+ * three allocator-fit holes.
+ *
+ * Fix experiment: reserve one permanent 3-slot camera arena once at bootstrap
+ * and give those fixed slots to the live camera queue with V4L2_MEMORY_USERPTR.
+ * 720 and 1080 share the same three slots; no camera-frame PSRAM is returned
+ * to/reacquired from the general heap between profile switches.
+ *
+ * Encoder OUTPUT already consumes these camera frames as USERPTR. Encoder
+ * CAPTURE remains the proven MMAP path for R1. Diagnostic/non-live camera
+ * paths remain MMAP.
+ *
+ * If the arena cannot be reserved at bootstrap, this feature fails open to the
+ * exact existing MMAP + BRIDGE-R1 path.
+ */
+#ifndef CAM_1080_USERPTR_ARENA_R1
+#define CAM_1080_USERPTR_ARENA_R1 1
+#endif
+
+#define CAM_USERPTR_ARENA_ALIGN       64U
+#define CAM_USERPTR_ARENA_SLOT_BYTES  CAM_PSRAM_1080_YU12_BLOCK_BYTES
+#define CAM_USERPTR_ARENA_BYTES       (CAM_USERPTR_ARENA_SLOT_BYTES * CAM_CSI_BUFFER_COUNT)
+
+static uint8_t *s_cam_userptr_arena;
+
+static inline bool cam_userptr_arena_ready(void)
+{
+#if CAM_1080_USERPTR_ARENA_R1
+    return s_cam_userptr_arena != NULL;
+#else
+    return false;
+#endif
+}
+
+static inline void *cam_userptr_arena_slot(uint32_t index)
+{
+    if (!cam_userptr_arena_ready() || index >= CAM_CSI_BUFFER_COUNT) {
+        return NULL;
+    }
+    return s_cam_userptr_arena + ((size_t)index * CAM_USERPTR_ARENA_SLOT_BYTES);
+}
+
+static bool cam_userptr_arena_reserve(void)
+{
+#if !CAM_1080_USERPTR_ARENA_R1
+    return false;
+#else
+    if (s_cam_userptr_arena) {
+        return true;
+    }
+
+    const size_t free0 = psram_free();
+    const size_t largest0 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    void *p = heap_caps_aligned_alloc(CAM_USERPTR_ARENA_ALIGN,
+                                      CAM_USERPTR_ARENA_BYTES,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_CACHE_ALIGNED);
+    if (!p) {
+        ESP_LOGE(TAG,
+                 "[CAM-USERPTR-ARENA-R1] RESERVE FAIL bytes=%u align=%u "
+                 "PSRAM=%u/%u; fallback=MMAP+BRIDGE-R1",
+                 (unsigned)CAM_USERPTR_ARENA_BYTES,
+                 (unsigned)CAM_USERPTR_ARENA_ALIGN,
+                 (unsigned)free0, (unsigned)largest0);
+        return false;
+    }
+
+    s_cam_userptr_arena = (uint8_t *)p;
+    ESP_LOGW(TAG,
+             "[CAM-USERPTR-ARENA-R2-CACHEALIGN] RESERVE PASS base=%p bytes=%u "
+             "slot=%u count=%u align=%u slots={%p,%p,%p} PSRAM=%u/%u->%u/%u",
+             p,
+             (unsigned)CAM_USERPTR_ARENA_BYTES,
+             (unsigned)CAM_USERPTR_ARENA_SLOT_BYTES,
+             (unsigned)CAM_CSI_BUFFER_COUNT,
+             (unsigned)CAM_USERPTR_ARENA_ALIGN,
+             cam_userptr_arena_slot(0), cam_userptr_arena_slot(1),
+             cam_userptr_arena_slot(2),
+             (unsigned)free0, (unsigned)largest0,
+             (unsigned)psram_free(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    return true;
+#endif
+}
+
+static bool cam_userptr_prepare_qbuf(struct v4l2_buffer *b)
+{
+    if (!b || !cam_userptr_arena_ready() || b->index >= CAM_CSI_BUFFER_COUNT) {
+        return false;
+    }
+    void *slot = cam_userptr_arena_slot(b->index);
+    if (!slot) {
+        return false;
+    }
+    b->memory = V4L2_MEMORY_USERPTR;
+    b->m.userptr = (unsigned long)slot;
+    b->length = CAM_USERPTR_ARENA_SLOT_BYTES;
+    return true;
+}
+
+/* [CAM-PSRAM-WALL-TRACE-R2-20261004]
+ * Read-only extension of FRAG-R1.  The recurring 1080 ENOMEM failure can have
+ * ~18 MB total PSRAM free while allocator-fit capacity is only two 1080
+ * buffers.  To identify the exact "walls" splitting the large free regions,
+ * retain pointer/size/status of the immediate previous and next heap block for
+ * each of the largest free blocks seen by the existing heap_caps_walk().
+ *
+ * IMPORTANT:
+ * - no allocation/free
+ * - no heap mutation
+ * - no logging from inside the walker callback
+ * - no second heap walk
+ * - only the already-existing pre-REQBUFS / REQBUFS-fail diagnostic calls
+ *   emit these extra lines.
+ */
+typedef struct {
+    void *ptr;
+    size_t size;
+    void *prev_ptr;
+    size_t prev_size;
+    bool prev_used;
+    bool prev_valid;
+    void *next_ptr;
+    size_t next_size;
+    bool next_used;
+    bool next_valid;
+    intptr_t heap_start;
+} cam_psram_frag_top_t;
+
+typedef struct {
+    size_t free_bytes;
+    cam_psram_frag_top_t top[CAM_PSRAM_FRAG_TOP_N];
+    uint32_t free_blocks;
+    uint32_t ge_1080_blocks;
+    uint32_t fit_1080_capacity;
+
+    void *prev_ptr;
+    size_t prev_size;
+    bool prev_used;
+    bool prev_valid;
+    intptr_t prev_heap_start;
+} cam_psram_frag_diag_t;
+
+static bool cam_psram_frag_walk_cb(walker_heap_into_t heap_info,
+                                   walker_block_info_t block_info,
+                                   void *user_data)
+{
+    cam_psram_frag_diag_t *d = (cam_psram_frag_diag_t *)user_data;
+    if (!d) {
+        return true;
+    }
+
+    /* If the block immediately before this one is one of our retained free
+     * blocks, this current block is its right-hand neighbour. */
+    if (d->prev_valid && d->prev_heap_start == heap_info.start) {
+        for (uint32_t i = 0; i < CAM_PSRAM_FRAG_TOP_N; ++i) {
+            if (d->top[i].ptr == d->prev_ptr && !d->top[i].next_valid) {
+                d->top[i].next_ptr = block_info.ptr;
+                d->top[i].next_size = block_info.size;
+                d->top[i].next_used = block_info.used;
+                d->top[i].next_valid = true;
+                break;
+            }
+        }
+    }
+
+    if (!block_info.used) {
+        d->free_blocks++;
+        d->free_bytes += block_info.size;
+        if (block_info.size >= CAM_PSRAM_1080_YU12_BLOCK_BYTES) {
+            d->ge_1080_blocks++;
+        }
+        d->fit_1080_capacity +=
+            (uint32_t)(block_info.size / CAM_PSRAM_1080_FIT_BYTES);
+
+        cam_psram_frag_top_t cand = {
+            .ptr = block_info.ptr,
+            .size = block_info.size,
+            .heap_start = heap_info.start,
+        };
+        if (d->prev_valid && d->prev_heap_start == heap_info.start) {
+            cand.prev_ptr = d->prev_ptr;
+            cand.prev_size = d->prev_size;
+            cand.prev_used = d->prev_used;
+            cand.prev_valid = true;
+        }
+
+        for (uint32_t i = 0; i < CAM_PSRAM_FRAG_TOP_N; ++i) {
+            if (cand.size > d->top[i].size) {
+                for (uint32_t j = CAM_PSRAM_FRAG_TOP_N - 1U; j > i; --j) {
+                    d->top[j] = d->top[j - 1U];
+                }
+                d->top[i] = cand;
+                break;
+            }
+        }
+    }
+
+    d->prev_ptr = block_info.ptr;
+    d->prev_size = block_info.size;
+    d->prev_used = block_info.used;
+    d->prev_valid = true;
+    d->prev_heap_start = heap_info.start;
+    return true;
+}
+
+static void cam_psram_frag_diag_log(const char *stage,
+                                    const char *profile_name,
+                                    uint32_t width,
+                                    uint32_t height)
+{
+    cam_psram_frag_diag_t d = {0};
+    heap_caps_walk(MALLOC_CAP_SPIRAM, cam_psram_frag_walk_cb, &d);
+
+    const size_t free_api = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t largest_api = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGW(TAG,
+             "[PSRAM-FRAG-R1] %s profile=%s %ux%u need=%u fit=%u "
+             "free_api=%u largest_api=%u walk_free=%u blocks=%u ge_need=%u cap=%u "
+             "top=%u@%p,%u@%p,%u@%p,%u@%p,%u@%p,%u@%p",
+             stage ? stage : "?",
+             profile_name ? profile_name : "?",
+             (unsigned)width, (unsigned)height,
+             (unsigned)CAM_PSRAM_1080_YU12_BLOCK_BYTES,
+             (unsigned)CAM_PSRAM_1080_FIT_BYTES,
+             (unsigned)free_api, (unsigned)largest_api,
+             (unsigned)d.free_bytes, (unsigned)d.free_blocks,
+             (unsigned)d.ge_1080_blocks,
+             (unsigned)d.fit_1080_capacity,
+             (unsigned)d.top[0].size, d.top[0].ptr,
+             (unsigned)d.top[1].size, d.top[1].ptr,
+             (unsigned)d.top[2].size, d.top[2].ptr,
+             (unsigned)d.top[3].size, d.top[3].ptr,
+             (unsigned)d.top[4].size, d.top[4].ptr,
+             (unsigned)d.top[5].size, d.top[5].ptr);
+
+    /* Only the top four are useful for this 1080 fit problem. Keeping this
+     * bounded avoids the old broad heap-wall log flood. */
+    for (uint32_t i = 0; i < 4U && i < CAM_PSRAM_FRAG_TOP_N; ++i) {
+        const cam_psram_frag_top_t *t = &d.top[i];
+        if (!t->ptr || t->size == 0U) break;
+        ESP_LOGW(TAG,
+                 "[PSRAM-WALL-R2] %s rank=%u free=%p/%u "
+                 "prev=%p/%u/%c next=%p/%u/%c",
+                 stage ? stage : "?",
+                 (unsigned)i,
+                 t->ptr, (unsigned)t->size,
+                 t->prev_valid ? t->prev_ptr : NULL,
+                 (unsigned)(t->prev_valid ? t->prev_size : 0U),
+                 t->prev_valid ? (t->prev_used ? 'U' : 'F') : '-',
+                 t->next_valid ? t->next_ptr : NULL,
+                 (unsigned)(t->next_valid ? t->next_size : 0U),
+                 t->next_valid ? (t->next_used ? 'U' : 'F') : '-');
+    }
+}
+
+static void cam_psram_1080_bridge_release(const char *reason)
+{
+    if (!s_psram_1080_bridge) return;
+
+    const size_t free0 = psram_free();
+    const size_t largest0 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    void *ptr = s_psram_1080_bridge;
+    s_psram_1080_bridge = NULL;
+    heap_caps_free(ptr);
+    const size_t free1 = psram_free();
+    const size_t largest1 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGW(TAG,
+             "[1080-PSRAM-BRIDGE-R1] RELEASE reason=%s bytes=%u ptr=%p "
+             "PSRAM=%u/%u->%u/%u",
+             reason ? reason : "?",
+             (unsigned)CAM_PSRAM_1080_BRIDGE_BYTES, ptr,
+             (unsigned)free0, (unsigned)largest0,
+             (unsigned)free1, (unsigned)largest1);
+}
+
+static bool cam_psram_1080_bridge_acquire(const char *reason)
+{
+    if (s_psram_1080_bridge) return true;
+
+    const size_t free0 = psram_free();
+    const size_t largest0 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    void *p = heap_caps_malloc(CAM_PSRAM_1080_BRIDGE_BYTES,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        ESP_LOGW(TAG,
+                 "[1080-PSRAM-BRIDGE-R1] ACQUIRE FAIL reason=%s bytes=%u "
+                 "free=%u largest=%u; fail-open",
+                 reason ? reason : "?",
+                 (unsigned)CAM_PSRAM_1080_BRIDGE_BYTES,
+                 (unsigned)psram_free(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        return false;
+    }
+
+    s_psram_1080_bridge = p;
+    const size_t free1 = psram_free();
+    const size_t largest1 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGW(TAG,
+             "[1080-PSRAM-BRIDGE-R1] ACQUIRE PASS reason=%s bytes=%u ptr=%p "
+             "PSRAM=%u/%u->%u/%u",
+             reason ? reason : "?",
+             (unsigned)CAM_PSRAM_1080_BRIDGE_BYTES, p,
+             (unsigned)free0, (unsigned)largest0,
+             (unsigned)free1, (unsigned)largest1);
+    return true;
 }
 
 typedef struct {
@@ -792,8 +1220,7 @@ static axi_qos_diag_t axi_qos_diag_read(void)
 static void axi_qos_diag_log(const char *phase, const axi_qos_diag_t *d)
 {
     if (!d) return;
-    ESP_LOGW(TAG,
-             "[AXI-QOS] %s READ-ONLY ar=0x%08" PRIx32 " aw=0x%08" PRIx32
+    CAM_DETAIL_DIAG("[AXI-QOS] %s READ-ONLY ar=0x%08" PRIx32 " aw=0x%08" PRIx32
              " cpu{r=%u,w=%u} cache{r=%u,w=%u} dma2d{r=%u,w=%u}"
              " gdma_m1{r=%u,w=%u} gdma_m2{r=%u,w=%u}"
              " h264_m1{r=%u,w=%u} h264_m2{r=%u,w=%u} pdma{r=%u,w=%u}",
@@ -1314,11 +1741,19 @@ static esp_err_t init_video_once(void)
         return ESP_OK;
     }
 
+    /* [DMA-CAM-START-R9-20260919] Split the unexplained ~1KB step that
+     * occurs after the ISP pipeline publishes but before C10A R0. */
+    const size_t r9_b0_free = dma_free();
+    const size_t r9_b0_largest = dma_largest();
+
     esp_err_t ret = bsp_i2c_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "bsp_i2c_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    const size_t r9_b1_free = dma_free();
+    const size_t r9_b1_largest = dma_largest();
 
     i2c_master_bus_handle_t i2c = bsp_i2c_get_handle();
     if (i2c == NULL) {
@@ -1341,9 +1776,13 @@ static esp_err_t init_video_once(void)
         .csi = &csi,
     };
 
+    const size_t r9_b2_free = dma_free();
+    const size_t r9_b2_largest = dma_largest();
     ESP_LOGI(TAG,
              "esp_video_init begin sensor=OV02C10 (active mode queried after init), reuse BSP I2C, dont_init_ldo=1");
     ret = esp_video_init(&cfg);
+    const size_t r9_b3_free = dma_free();
+    const size_t r9_b3_largest = dma_largest();
     if (ret != ESP_OK) {
         s_state.video_inited = false;
         ESP_LOGE(TAG, "esp_video_init failed: %s", esp_err_to_name(ret));
@@ -1365,7 +1804,11 @@ static esp_err_t init_video_once(void)
      * Re-init/deinit safety after a partial sensor-detect failure must be
      * verified in esp_video internals before automatic recovery is added.
      */
+    const size_t r9_b4_free = dma_free();
+    const size_t r9_b4_largest = dma_largest();
     int verify_fd = open(CAM_CSI_DEVICE, O_RDWR);
+    const size_t r9_b5_free = dma_free();
+    const size_t r9_b5_largest = dma_largest();
     if (verify_fd < 0) {
         const int verify_errno = errno;
 
@@ -1380,8 +1823,19 @@ static esp_err_t init_video_once(void)
     }
 
     close(verify_fd);
+    const size_t r9_b6_free = dma_free();
+    const size_t r9_b6_largest = dma_largest();
 
     s_state.video_inited = true;
+
+    CAM_DETAIL_DIAG("[DMA-CAM-START-R9] INIT B0_entry=%u/%u B1_i2c=%u/%u B2_pre_video=%u/%u B3_post_video=%u/%u B4_pre_verify=%u/%u B5_verify_open=%u/%u B6_verify_close=%u/%u",
+             (unsigned)r9_b0_free, (unsigned)r9_b0_largest,
+             (unsigned)r9_b1_free, (unsigned)r9_b1_largest,
+             (unsigned)r9_b2_free, (unsigned)r9_b2_largest,
+             (unsigned)r9_b3_free, (unsigned)r9_b3_largest,
+             (unsigned)r9_b4_free, (unsigned)r9_b4_largest,
+             (unsigned)r9_b5_free, (unsigned)r9_b5_largest,
+             (unsigned)r9_b6_free, (unsigned)r9_b6_largest);
 
     ESP_LOGI(TAG,
              "[CAM-INIT-VERIFY-SAFE] esp_video_init OK + %s present",
@@ -2051,6 +2505,16 @@ static esp_err_t h264_test_handler(httpd_req_t *req)
         ESP_LOGW(TAG, "camera DQ timeout ioctl rejected errno=%d; continue", errno);
     }
 
+    /* R2D safety net: there must be no previous FACE-AI allocation lifetime
+     * overlapping a fresh camera buffer allocation. Normally cleanup already
+     * released it; this is then a cheap no-op. */
+    (void)face_ai_tap_shutdown(750);
+
+    ESP_LOGW(TAG,
+             "[FACE-AI-R2D] before camera REQBUFS PSRAM free=%u largest=%u",
+             (unsigned)psram_free(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+
     struct v4l2_requestbuffers cam_req = {
         .count = CAM_CSI_BUFFER_COUNT,
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -2518,6 +2982,7 @@ typedef struct {
      * Cross-task request/ack only; the actual H264 parameter write is executed
      * by the camera worker between frames so encoder/DMA ownership never moves. */
     uint32_t                   gop_request;
+    uint32_t                   qp_request;
     uint32_t                   gop_request_seq;
     uint32_t                   gop_applied_seq;
     esp_err_t                  gop_apply_result;
@@ -2526,6 +2991,17 @@ typedef struct {
 
 static camera_live_state_t s_live;
 static portMUX_TYPE s_live_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* [CAM-LIVE-STATIC-STACK-R2-20260914]
+ * Keep the live camera worker stack out of the runtime internal/DMA heap.
+ * The dynamic xTaskCreatePinnedToCore() path could consume the current largest
+ * DMA block during 720<->1080 restarts (observed 31744 -> 21504, exactly the
+ * 10240-byte stack). ESP-IDF FreeRTOS uses byte-sized StackType_t for pinned
+ * task stack depth; assert that assumption so this stays explicit. */
+_Static_assert(sizeof(StackType_t) == 1,
+               "CAM_LIVE_TASK_STACK expects ESP-IDF byte-sized StackType_t");
+static StaticTask_t s_cam_live_task_tcb;
+static StackType_t s_cam_live_task_stack[CAM_LIVE_TASK_STACK];
 
 /* [CAM-DMA-STAGED-PREWARM V3 2026-08-24]
  * V2.1 proved two things on hardware:
@@ -2577,9 +3053,93 @@ static bool s_dma_prewarm_active;
 static bool s_dma_late_isr_attempted;
 static esp_err_t camera_dma_late_isr_stabilize_once(void);
 
-/* [REF-POOL 2026-08-24]
- * 720p->1080p no longer uses esp_restart(). The H.264 reference-frame
- * allocation is supplied by a persistent boot-time pool in esp_h264. */
+/* [CAM-DMA-BOUNDARY-R16F8-20260919]
+ * Boundary policy: do not keep chasing every late 2/4KB heap user.  Instead,
+ * create the camera/ISP control-side lazy objects once, before the camera page
+ * starts its follow-up HTTP/WebRTC traffic, and never return those objects to
+ * the general INTERNAL|DMA heap.  R12 already keeps the ISP controller
+ * resident across 720<->1080.  This bootstrap simply moves the FIRST
+ * esp_video/ISP allocation window earlier, while the contiguous DMA block is
+ * still healthy.
+ *
+ * This is intentionally not a dead DMA anchor.  A dead anchor would lower the
+ * SDIO/lwIP DMA headroom while nobody could use the bytes.  Here the reserved
+ * boundary is made from the real camera objects themselves and is reused for
+ * the lifetime of the process.  H.264 ref/small pools remain the existing
+ * persistent pools; camera task/ISP TCB/audio-gate remain static/PSRAM. */
+static bool s_dma_boundary_bootstrap_attempted;
+
+esp_err_t camera_h264_dma_boundary_bootstrap(void)
+{
+    if (s_state.video_inited) {
+        ESP_LOGW(TAG,
+                 "[CAM-DMA-BOUNDARY-R16F8] already resident dma=%u/%u",
+                 (unsigned)dma_free(), (unsigned)dma_largest());
+        return ESP_OK;
+    }
+    if (s_dma_boundary_bootstrap_attempted) {
+        ESP_LOGW(TAG,
+                 "[CAM-DMA-BOUNDARY-R16F8] prior bootstrap did not become resident; fail-open to normal START");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Never interfere with an already-running diagnostic/live path. */
+    taskENTER_CRITICAL(&s_live_mux);
+    const bool live_busy = s_live.running;
+    taskEXIT_CRITICAL(&s_live_mux);
+    if (live_busy || s_state.running || s_state.consumed) {
+        ESP_LOGW(TAG,
+                 "[CAM-DMA-BOUNDARY-R16F8] skip busy live=%d diag_running=%d consumed=%d",
+                 live_busy ? 1 : 0, s_state.running ? 1 : 0, s_state.consumed ? 1 : 0);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_dma_boundary_bootstrap_attempted = true;
+    const size_t free0 = dma_free();
+    const size_t largest0 = dma_largest();
+    ESP_LOGW(TAG,
+             "[CAM-DMA-BOUNDARY-R16F8] bootstrap begin canonical=1080 dma=%u/%u",
+             (unsigned)free0, (unsigned)largest0);
+
+    /* [CAM-1080-USERPTR-ARENA-R1]
+     * Reserve all three camera frame slots once. If that cannot be done on
+     * this boot, preserve the exact existing MMAP + single-bridge fallback. */
+    if (!cam_userptr_arena_reserve()) {
+        (void)cam_psram_1080_bridge_acquire("bootstrap-fallback");
+    }
+
+    esp_err_t ret = ov02c10_webrtc_select_profile((uint32_t)CAMERA_H264_PROFILE_1080P);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "[CAM-DMA-BOUNDARY-R16F8] select canonical 1080 failed: %s",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = init_video_once();
+    const size_t free1 = dma_free();
+    const size_t largest1 = dma_largest();
+    if (ret != ESP_OK || !s_state.video_inited) {
+        ESP_LOGE(TAG,
+                 "[CAM-DMA-BOUNDARY-R16F8] bootstrap failed ret=%s resident=%d dma=%u/%u -> %u/%u; normal START remains fail-open",
+                 esp_err_to_name(ret), s_state.video_inited ? 1 : 0,
+                 (unsigned)free0, (unsigned)largest0,
+                 (unsigned)free1, (unsigned)largest1);
+        return ret == ESP_OK ? ESP_FAIL : ret;
+    }
+
+    ESP_LOGW(TAG,
+             "[CAM-DMA-BOUNDARY-R16F8] bootstrap OK controller=RESIDENT dma=%u/%u -> %u/%u delta_free=%d delta_largest=%d",
+             (unsigned)free0, (unsigned)largest0,
+             (unsigned)free1, (unsigned)largest1,
+             (int)free1 - (int)free0, (int)largest1 - (int)largest0);
+    return ESP_OK;
+}
+
+/* Stable profile switching is restart-free.
+ * H.264 memory uses the paired INTERNAL persistent reference + PSRAM staging
+ * pool, the R23 PSRAM DB pool, and the R3B 20 KiB INTERNAL small-object pool.
+ * Do not remove one pool solely because another pool normally owns the frame. */
 
 esp_err_t camera_h264_stream_set_profile(camera_h264_profile_t profile)
 {
@@ -2594,10 +3154,10 @@ esp_err_t camera_h264_stream_set_profile(camera_h264_profile_t profile)
         return ESP_ERR_INVALID_STATE;
     }
     s_live_profile_selected = profile;
-    /* [CAM-1080-LIVE-GOP-R1-20260913] Every fresh 1080 session starts from
-     * the safe GOP5 baseline. Adaptive GOP changes are applied in-place to the
-     * already-open encoder and therefore never call set_profile(). */
-    if (profile == CAMERA_H264_PROFILE_1080P) s_live_1080_gop_selected = 5U;
+    if (profile == CAMERA_H264_PROFILE_1080P) {
+        s_live_1080_qp_selected = 32U;
+        s_live_1080_gop_selected = 15U;
+    }
     taskEXIT_CRITICAL(&s_live_mux);
 
     ESP_LOGI(TAG, "LIVE next profile=%s", camera_h264_stream_profile_name(profile));
@@ -2618,66 +3178,47 @@ camera_h264_profile_t camera_h264_stream_get_profile(void)
  * for the next open. While running it posts a request to the camera worker;
  * that worker updates the already-open HW encoder between frames and ACKs it.
  * No camera task, V4L2 queue, H264 object, WEB20 pool, or DMA block is recreated. */
-esp_err_t camera_h264_stream_set_gop(uint32_t gop)
+esp_err_t camera_h264_stream_set_1080_net_profile(uint32_t qp, uint32_t gop)
 {
-    if (gop != 1U && gop != 5U) return ESP_ERR_INVALID_ARG;
-
+    if (!((qp == 30U && gop == 5U) || (qp == 32U && gop == 15U))) return ESP_ERR_INVALID_ARG;
     uint32_t request_seq = 0;
     taskENTER_CRITICAL(&s_live_mux);
-    if (s_live_profile_selected != CAMERA_H264_PROFILE_1080P) {
-        taskEXIT_CRITICAL(&s_live_mux);
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-
+    if (s_live_profile_selected != CAMERA_H264_PROFILE_1080P) { taskEXIT_CRITICAL(&s_live_mux); return ESP_ERR_NOT_SUPPORTED; }
     if (!s_live.running) {
-        s_live_1080_gop_selected = gop;
+        s_live_1080_qp_selected = qp; s_live_1080_gop_selected = gop;
         taskEXIT_CRITICAL(&s_live_mux);
-        ESP_LOGI(TAG, "[CAM-1080-LIVE-GOP-R1-20260913] next 1080 GOP=%u (stopped)",
-                 (unsigned)gop);
+        ESP_LOGI(TAG, "[1080-NET-PROFILE] next state=%s qp=%u gop=%u (stopped)", (qp == 30U) ? "GOOD" : "LTE", (unsigned)qp, (unsigned)gop);
         return ESP_OK;
     }
-
-    if (s_live_1080_gop_selected == gop &&
-        s_live.gop_request_seq == s_live.gop_applied_seq) {
-        taskEXIT_CRITICAL(&s_live_mux);
-        return ESP_OK;
-    }
-
-    request_seq = s_live.gop_request_seq + 1U;
-    if (request_seq == 0U) request_seq = 1U;
-    s_live.gop_request = gop;
-    s_live.gop_request_seq = request_seq;
-    s_live.gop_apply_result = ESP_ERR_INVALID_STATE;
+    if (s_live_1080_qp_selected == qp && s_live_1080_gop_selected == gop && s_live.gop_request_seq == s_live.gop_applied_seq) { taskEXIT_CRITICAL(&s_live_mux); return ESP_OK; }
+    request_seq = s_live.gop_request_seq + 1U; if (request_seq == 0U) request_seq = 1U;
+    s_live.qp_request = qp; s_live.gop_request = gop; s_live.gop_request_seq = request_seq; s_live.gop_apply_result = ESP_ERR_INVALID_STATE;
     taskEXIT_CRITICAL(&s_live_mux);
-
-    const int64_t deadline_us = esp_timer_get_time() +
-                                (int64_t)CAM_LIVE_GOP_APPLY_TIMEOUT_MS * 1000LL;
-    TickType_t poll_ticks = pdMS_TO_TICKS(5U);
-    if (poll_ticks == 0) poll_ticks = 1;
-
+    const int64_t deadline_us = esp_timer_get_time() + (int64_t)CAM_LIVE_GOP_APPLY_TIMEOUT_MS * 1000LL;
+    TickType_t poll_ticks = pdMS_TO_TICKS(5U); if (poll_ticks == 0) poll_ticks = 1;
     while (esp_timer_get_time() < deadline_us) {
-        uint32_t applied_seq;
-        esp_err_t result;
-        bool running;
-        taskENTER_CRITICAL(&s_live_mux);
-        applied_seq = s_live.gop_applied_seq;
-        result = s_live.gop_apply_result;
-        running = s_live.running;
-        taskEXIT_CRITICAL(&s_live_mux);
-
-        if (applied_seq == request_seq) {
-            return result;
-        }
-        if (!running) {
-            return ESP_ERR_INVALID_STATE;
-        }
+        uint32_t applied_seq; esp_err_t result; bool running;
+        taskENTER_CRITICAL(&s_live_mux); applied_seq = s_live.gop_applied_seq; result = s_live.gop_apply_result; running = s_live.running; taskEXIT_CRITICAL(&s_live_mux);
+        if (applied_seq == request_seq) return result;
+        if (!running) return ESP_ERR_INVALID_STATE;
         vTaskDelay(poll_ticks);
     }
-
-    ESP_LOGE(TAG,
-             "[CAM-1080-LIVE-GOP-R1-20260913] apply timeout target=%u seq=%u",
-             (unsigned)gop, (unsigned)request_seq);
+    ESP_LOGE(TAG, "[1080-NET-PROFILE] apply timeout target_qp=%u target_gop=%u seq=%u", (unsigned)qp, (unsigned)gop, (unsigned)request_seq);
     return ESP_ERR_TIMEOUT;
+}
+
+esp_err_t camera_h264_stream_set_gop(uint32_t gop)
+{
+    if (gop == 5U) return camera_h264_stream_set_1080_net_profile(30U, 5U);
+    if (gop == 15U) return camera_h264_stream_set_1080_net_profile(32U, 15U);
+    return ESP_ERR_INVALID_ARG;
+}
+
+uint32_t camera_h264_stream_get_qp(void)
+{
+    uint32_t qp; taskENTER_CRITICAL(&s_live_mux);
+    qp = (s_live_profile_selected == CAMERA_H264_PROFILE_1080P) ? s_live_1080_qp_selected : 39U;
+    taskEXIT_CRITICAL(&s_live_mux); return qp;
 }
 
 uint32_t camera_h264_stream_get_gop(void)
@@ -2685,7 +3226,7 @@ uint32_t camera_h264_stream_get_gop(void)
     uint32_t gop;
     taskENTER_CRITICAL(&s_live_mux);
     gop = (s_live_profile_selected == CAMERA_H264_PROFILE_1080P)
-        ? s_live_1080_gop_selected : 5U;
+        ? s_live_1080_gop_selected : 8U;
     taskEXIT_CRITICAL(&s_live_mux);
     return gop;
 }
@@ -2729,6 +3270,7 @@ static bool live_stop_requested(void)
  * and WEB20 20KB transient pool all stay exactly where they are. */
 static void live_apply_pending_gop_request(void)
 {
+    uint32_t qp_request = 0;
     uint32_t request = 0;
     uint32_t request_seq = 0;
     uint32_t applied_seq = 0;
@@ -2737,6 +3279,7 @@ static void live_apply_pending_gop_request(void)
     taskENTER_CRITICAL(&s_live_mux);
     request_seq = s_live.gop_request_seq;
     applied_seq = s_live.gop_applied_seq;
+    qp_request = s_live.qp_request;
     request = s_live.gop_request;
     old_gop = s_live_1080_gop_selected;
     taskEXIT_CRITICAL(&s_live_mux);
@@ -2745,14 +3288,18 @@ static void live_apply_pending_gop_request(void)
 
     const size_t dma_before_free = dma_free();
     const size_t dma_before_largest = dma_largest();
-    esp_h264_err_t hr = esp_h264_enc_hw_active_set_gop((uint8_t)request);
-    const esp_err_t result = (hr == ESP_H264_ERR_OK) ? ESP_OK : ESP_FAIL;
+    esp_h264_err_t qhr = esp_h264_enc_hw_active_set_fixed_qp((uint8_t)qp_request);
+    esp_h264_err_t ghr = (qhr == ESP_H264_ERR_OK) ? esp_h264_enc_hw_active_set_gop((uint8_t)request) : ESP_H264_ERR_FAIL;
+    const esp_err_t result = (qhr == ESP_H264_ERR_OK && ghr == ESP_H264_ERR_OK) ? ESP_OK : ESP_FAIL;
     const size_t dma_after_free = dma_free();
     const size_t dma_after_largest = dma_largest();
 
     taskENTER_CRITICAL(&s_live_mux);
     if (result == ESP_OK) {
+        s_live_1080_qp_selected = qp_request;
         s_live_1080_gop_selected = request;
+        s_live.stats.h264_qp_min = qp_request;
+        s_live.stats.h264_qp_max = qp_request;
         s_live.stats.h264_gop = request;
     }
     s_live.gop_apply_result = result;
@@ -2760,9 +3307,9 @@ static void live_apply_pending_gop_request(void)
     taskEXIT_CRITICAL(&s_live_mux);
 
     ESP_LOGW(TAG,
-             "[CAM-1080-LIVE-GOP-R1-20260913] worker apply GOP %u -> %u result=%s "
+             "[1080-NET-PROFILE] worker apply state=%s qp=%u GOP %u -> %u result=%s "
              "dma=%u/%u -> %u/%u (no restart/no alloc)",
-             (unsigned)old_gop, (unsigned)request, esp_err_to_name(result),
+             (qp_request == 30U) ? "GOOD" : "LTE", (unsigned)qp_request, (unsigned)old_gop, (unsigned)request, esp_err_to_name(result),
              (unsigned)dma_before_free, (unsigned)dma_before_largest,
              (unsigned)dma_after_free, (unsigned)dma_after_largest);
 }
@@ -2776,7 +3323,7 @@ static void camera_streamparm_30fps_best_effort(int fd, uint32_t sensor_fps)
         const struct v4l2_fract *t = &before.parm.capture.timeperframe;
         uint32_t fps_x100 = (t->numerator && t->denominator)
             ? (uint32_t)(((uint64_t)t->denominator * 100ULL) / t->numerator) : 0;
-        ESP_LOGI(TAG, "LIVE camera G_PARM before=%u.%02u fps cap=0x%08x",
+        CAM_DETAIL_INFO("LIVE camera G_PARM before=%u.%02u fps cap=0x%08x",
                  (unsigned)(fps_x100 / 100), (unsigned)(fps_x100 % 100),
                  (unsigned)before.parm.capture.capability);
     } else {
@@ -2794,7 +3341,7 @@ static void camera_streamparm_30fps_best_effort(int fd, uint32_t sensor_fps)
         ESP_LOGW(TAG, "LIVE camera S_PARM %ufps rejected errno=%d (%s); keep driver timing",
                  (unsigned)req_fps, errno, strerror(errno));
     } else {
-        ESP_LOGI(TAG, "LIVE camera S_PARM requested=%ufps accepted", (unsigned)req_fps);
+        CAM_DETAIL_INFO("LIVE camera S_PARM requested=%ufps accepted", (unsigned)req_fps);
     }
 
     struct v4l2_streamparm after = {
@@ -2804,7 +3351,7 @@ static void camera_streamparm_30fps_best_effort(int fd, uint32_t sensor_fps)
         const struct v4l2_fract *t = &after.parm.capture.timeperframe;
         uint32_t fps_x100 = (t->numerator && t->denominator)
             ? (uint32_t)(((uint64_t)t->denominator * 100ULL) / t->numerator) : 0;
-        ESP_LOGI(TAG, "LIVE camera G_PARM after=%u.%02u fps",
+        CAM_DETAIL_INFO("LIVE camera G_PARM after=%u.%02u fps",
                  (unsigned)(fps_x100 / 100), (unsigned)(fps_x100 % 100));
     }
 }
@@ -2844,6 +3391,318 @@ static void live_reqbufs_release_best_effort(int fd, int type, int memory, const
  * investigation. Keep its implementation available, but disable it in normal
  * production so it neither traces allocations nor emits transition MARK logs. */
 #define CAM_DMA_HEAP_TRACE_DIAG_ENABLE 0
+
+/* [CAM-DMA-OWNER-TRACE-R1-20261009]
+ * Diagnostic only. Goal: prove which camera/H.264 V4L2 step creates and which
+ * step frees the INTERNAL|DMA block that splits the ~32 KB free body
+ * (largest 31744 -> 16384) during a 1080p WebRTC live session.
+ *
+ *  - No heap allocation: all state lives in one PSRAM BSS struct.
+ *  - heap_caps_walk() callback copies >=1 KiB blocks into that struct only
+ *    (no logging, no locks, no service calls inside the walk).
+ *  - Each mark logs only the delta of USED blocks since the previous mark;
+ *    marks with no >=1 KiB change and |d_free|<512 print nothing.
+ *  - Called only from the camera live worker (single writer).
+ *  - Does not change any camera/H.264/ISP/WebRTC/audio policy or ordering.
+ * Set CAM_DMA_OWNER_TRACE_R1 to 0 to compile the whole thing out. */
+#ifndef CAM_DMA_OWNER_TRACE_R1
+#define CAM_DMA_OWNER_TRACE_R1 1
+#endif
+
+#if CAM_DMA_OWNER_TRACE_R1
+#define CDOT_MIN_BLOCK   512U    /* [R1B] 1024 -> 512 */
+#define CDOT_MAX_BLOCKS  192U    /* [R1B] 96 -> 192 (state now in PSRAM) */
+#define CDOT_MAX_HEAPS   8U
+#define CDOT_MAX_PRINT   10U     /* [R1B] 6 -> 10 */
+#define CDOT_PEEK_MIN    4096U
+/* Optional: also print the first 4 words of a new >=4 KiB USED block.
+ * Default OFF: a CPU read could leave a clean cache line over memory a
+ * hardware block may be writing. Enable only for a follow-up run. */
+#ifndef CDOT_PEEK_WORDS
+#define CDOT_PEEK_WORDS  0
+#endif
+
+typedef struct {
+    uintptr_t ptr;
+    uint32_t size;
+    uint8_t used;
+    uint8_t heap;
+} cdot_blk_t;
+
+typedef struct {
+    uint32_t n;
+    uint32_t ovf;
+    uint32_t seen;
+    cdot_blk_t b[CDOT_MAX_BLOCKS];
+} cdot_snap_t;
+
+typedef struct {
+    uintptr_t start;
+    uintptr_t end;
+} cdot_heap_t;
+
+typedef struct {
+    cdot_snap_t snap[2];
+    cdot_heap_t heaps[CDOT_MAX_HEAPS];
+    uint32_t heap_n;
+    uint32_t cur;
+    uint32_t seq;
+    uint32_t mark_no;
+    uint32_t printed;
+    uint32_t prev_free;
+    uint32_t prev_largest;
+    bool active;
+    bool heaps_logged;
+} cdot_state_t;
+
+/* [CAM-DMA-OWNER-TRACE-R1B-20261009]
+ * R1 declared this state EXT_RAM_BSS_ATTR, but the R1 boot log shows the
+ * INTERNAL|DMA heap smaller by exactly 2432 B from the first BOOT-DMA sample
+ * (= sizeof(cdot_state_t) 2424 rounded), i.e. it was placed in internal .bss.
+ * That shifted the boot layout. R1B keeps only one pointer in .bss and takes
+ * the state once from PSRAM (MALLOC_CAP_SPIRAM only, never freed). No
+ * INTERNAL heap allocation is made by this tracer. */
+#define CDOT_DISABLED ((cdot_state_t *)(uintptr_t)1U)
+static cdot_state_t *s_cdotp;
+#define s_cdot (*s_cdotp)
+
+static bool cdot_ready(void)
+{
+    if (s_cdotp == CDOT_DISABLED) return false;
+    if (s_cdotp) return true;
+    cdot_state_t *p = (cdot_state_t *)heap_caps_calloc(1, sizeof(cdot_state_t),
+                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        s_cdotp = CDOT_DISABLED;
+        ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B] PSRAM state alloc failed bytes=%u -> tracer disabled",
+                 (unsigned)sizeof(cdot_state_t));
+        return false;
+    }
+    s_cdotp = p;
+    ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B] state PSRAM=%p bytes=%u internal_bss=%u min_block=%u",
+             (void *)p, (unsigned)sizeof(cdot_state_t), (unsigned)sizeof(s_cdotp),
+             (unsigned)CDOT_MIN_BLOCK);
+    return true;
+}
+
+static bool cdot_live(void)
+{
+    return s_cdotp && s_cdotp != CDOT_DISABLED && s_cdot.active;
+}
+
+static uint8_t cdot_heap_index(intptr_t start, intptr_t end)
+{
+    for (uint32_t i = 0; i < s_cdot.heap_n; ++i) {
+        if (s_cdot.heaps[i].start == (uintptr_t)start) return (uint8_t)i;
+    }
+    if (s_cdot.heap_n < CDOT_MAX_HEAPS) {
+        s_cdot.heaps[s_cdot.heap_n].start = (uintptr_t)start;
+        s_cdot.heaps[s_cdot.heap_n].end = (uintptr_t)end;
+        return (uint8_t)(s_cdot.heap_n++);
+    }
+    return 0xFFU;
+}
+
+static bool cdot_walk_cb(walker_heap_into_t heap_info,
+                         walker_block_info_t block_info,
+                         void *user_data)
+{
+    cdot_snap_t *s = (cdot_snap_t *)user_data;
+    if (!s) return false;
+    s->seen++;
+    if (block_info.size < CDOT_MIN_BLOCK) return true;
+    if (s->n >= CDOT_MAX_BLOCKS) {
+        s->ovf++;
+        return true;
+    }
+    cdot_blk_t *e = &s->b[s->n++];
+    e->ptr = (uintptr_t)block_info.ptr;
+    e->size = (uint32_t)block_info.size;
+    e->used = block_info.used ? 1U : 0U;
+    e->heap = cdot_heap_index(heap_info.start, heap_info.end);
+    return true;
+}
+
+static const cdot_snap_t *cdot_take(void)
+{
+    const uint32_t next = s_cdot.cur ^ 1U;
+    cdot_snap_t *s = &s_cdot.snap[next];
+    memset(s, 0, sizeof(*s));
+    heap_caps_walk(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, cdot_walk_cb, s);
+    s_cdot.cur = next;
+    return s;
+}
+
+static const cdot_blk_t *cdot_maxfree(const cdot_snap_t *s, int heap)
+{
+    const cdot_blk_t *best = NULL;
+    for (uint32_t i = 0; i < s->n; ++i) {
+        const cdot_blk_t *e = &s->b[i];
+        if (e->used) continue;
+        if (heap >= 0 && e->heap != (uint8_t)heap) continue;
+        if (!best || e->size > best->size) best = e;
+    }
+    return best;
+}
+
+static bool cdot_has_used(const cdot_snap_t *s, const cdot_blk_t *b)
+{
+    for (uint32_t i = 0; i < s->n; ++i) {
+        const cdot_blk_t *e = &s->b[i];
+        if (e->used && e->ptr == b->ptr && e->size == b->size) return true;
+    }
+    return false;
+}
+
+static const cdot_blk_t *cdot_prev_used(const cdot_snap_t *s, const cdot_blk_t *f)
+{
+    const cdot_blk_t *best = NULL;
+    if (!f) return NULL;
+    for (uint32_t i = 0; i < s->n; ++i) {
+        const cdot_blk_t *e = &s->b[i];
+        if (!e->used || e->heap != f->heap || e->ptr >= f->ptr) continue;
+        if (!best || e->ptr > best->ptr) best = e;
+    }
+    return best;
+}
+
+static int cdot_gap(const cdot_blk_t *w, const cdot_blk_t *f)
+{
+    if (!w || !f) return -1;
+    return (int)(f->ptr - (w->ptr + w->size));
+}
+
+static void cdot_r1_begin(const char *profile_name)
+{
+    if (!cdot_ready()) return;
+    s_cdot.seq++;
+    s_cdot.mark_no = 0;
+    s_cdot.printed = 0;
+    const size_t f = dma_free();
+    const size_t l = dma_largest();
+    const cdot_snap_t *s = cdot_take();
+    uint32_t used = 0, fr = 0;
+    for (uint32_t i = 0; i < s->n; ++i) {
+        if (s->b[i].used) used++; else fr++;
+    }
+    const cdot_blk_t *mf = cdot_maxfree(s, -1);
+    const cdot_blk_t *mw = cdot_prev_used(s, mf);
+    ESP_LOGW(TAG,
+             "[CAM-DMA-OWNER-R1B] BEGIN seq=%u profile=%s dma=%u/%u ge512=%u(used=%u free=%u) seen=%u ovf=%u maxfree=%p/%u heap=%d wall=%p/%u gap=%d",
+             (unsigned)s_cdot.seq, profile_name ? profile_name : "?",
+             (unsigned)f, (unsigned)l, (unsigned)s->n, (unsigned)used, (unsigned)fr,
+             (unsigned)s->seen, (unsigned)s->ovf,
+             mf ? (void *)mf->ptr : NULL, mf ? (unsigned)mf->size : 0U,
+             mf ? (int)mf->heap : -1,
+             mw ? (void *)mw->ptr : NULL, mw ? (unsigned)mw->size : 0U, cdot_gap(mw, mf));
+    if (!s_cdot.heaps_logged) {
+        s_cdot.heaps_logged = true;
+        for (uint32_t h = 0; h < s_cdot.heap_n; ++h) {
+            uint32_t hu = 0, hf = 0, hub = 0;
+            for (uint32_t i = 0; i < s->n; ++i) {
+                if (s->b[i].heap != (uint8_t)h) continue;
+                if (s->b[i].used) { hu++; hub += s->b[i].size; } else { hf++; }
+            }
+            const cdot_blk_t *hmf = cdot_maxfree(s, (int)h);
+            ESP_LOGW(TAG,
+                     "[CAM-DMA-OWNER-R1B] HEAP[%u] %p..%p size=%u used_ge512=%u/%uB free_ge512=%u maxfree=%p/%u",
+                     (unsigned)h, (void *)s_cdot.heaps[h].start, (void *)s_cdot.heaps[h].end,
+                     (unsigned)(s_cdot.heaps[h].end - s_cdot.heaps[h].start),
+                     (unsigned)hu, (unsigned)hub, (unsigned)hf,
+                     hmf ? (void *)hmf->ptr : NULL, hmf ? (unsigned)hmf->size : 0U);
+        }
+    }
+    s_cdot.prev_free = (uint32_t)f;
+    s_cdot.prev_largest = (uint32_t)l;
+    s_cdot.active = true;
+}
+
+static void cdot_r1_mark(const char *stage)
+{
+    if (!cdot_live()) return;
+    const uint32_t prev_idx = s_cdot.cur;
+    const size_t f = dma_free();
+    const size_t l = dma_largest();
+    const cdot_snap_t *cur = cdot_take();
+    const cdot_snap_t *prev = &s_cdot.snap[prev_idx];
+    s_cdot.mark_no++;
+
+    uint32_t n_new = 0, n_gone = 0;
+    for (uint32_t i = 0; i < cur->n; ++i) {
+        if (cur->b[i].used && !cdot_has_used(prev, &cur->b[i])) n_new++;
+    }
+    for (uint32_t i = 0; i < prev->n; ++i) {
+        if (prev->b[i].used && !cdot_has_used(cur, &prev->b[i])) n_gone++;
+    }
+    const int d_free = (int)f - (int)s_cdot.prev_free;
+    const int d_largest = (int)l - (int)s_cdot.prev_largest;
+    s_cdot.prev_free = (uint32_t)f;
+    s_cdot.prev_largest = (uint32_t)l;
+    if (n_new == 0U && n_gone == 0U && d_largest == 0 && d_free > -512 && d_free < 512) {
+        return;
+    }
+    s_cdot.printed++;
+    const cdot_blk_t *mf = cdot_maxfree(cur, -1);
+    const cdot_blk_t *mw = cdot_prev_used(cur, mf);
+    ESP_LOGW(TAG,
+             "[CAM-DMA-OWNER-R1B] MARK seq=%u #%u %s dma=%u/%u d_free=%d d_largest=%d maxfree=%p/%u heap=%d wall=%p/%u gap=%d new=%u gone=%u ovf=%u",
+             (unsigned)s_cdot.seq, (unsigned)s_cdot.mark_no, stage ? stage : "?",
+             (unsigned)f, (unsigned)l, d_free, d_largest,
+             mf ? (void *)mf->ptr : NULL, mf ? (unsigned)mf->size : 0U,
+             mf ? (int)mf->heap : -1,
+             mw ? (void *)mw->ptr : NULL, mw ? (unsigned)mw->size : 0U, cdot_gap(mw, mf),
+             (unsigned)n_new, (unsigned)n_gone, (unsigned)cur->ovf);
+    uint32_t shown = 0;
+    for (uint32_t i = 0; i < cur->n && shown < CDOT_MAX_PRINT; ++i) {
+        const cdot_blk_t *e = &cur->b[i];
+        if (!e->used || cdot_has_used(prev, e)) continue;
+        shown++;
+        if (CDOT_PEEK_WORDS && e->size >= CDOT_PEEK_MIN) {
+            const volatile uint32_t *w = (const volatile uint32_t *)e->ptr;
+            ESP_LOGW(TAG,
+                     "[CAM-DMA-OWNER-R1B]   +USED ptr=%p size=%u heap=%u w=%08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32,
+                     (void *)e->ptr, (unsigned)e->size, (unsigned)e->heap,
+                     w[0], w[1], w[2], w[3]);
+        } else {
+            ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B]   +USED ptr=%p size=%u heap=%u",
+                     (void *)e->ptr, (unsigned)e->size, (unsigned)e->heap);
+        }
+    }
+    uint32_t shown_gone = 0;
+    for (uint32_t i = 0; i < prev->n && shown_gone < CDOT_MAX_PRINT; ++i) {
+        const cdot_blk_t *e = &prev->b[i];
+        if (!e->used || cdot_has_used(cur, e)) continue;
+        shown_gone++;
+        ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B]   -USED ptr=%p size=%u heap=%u",
+                 (void *)e->ptr, (unsigned)e->size, (unsigned)e->heap);
+    }
+    if (n_new > shown || n_gone > shown_gone) {
+        ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B]   (not shown: new=%u gone=%u)",
+                 (unsigned)(n_new - shown), (unsigned)(n_gone - shown_gone));
+    }
+}
+
+static void cdot_r1_end(const char *stage)
+{
+    if (!cdot_live()) return;
+    cdot_r1_mark(stage);
+    const cdot_snap_t *last = &s_cdot.snap[s_cdot.cur];
+    const cdot_blk_t *mf = cdot_maxfree(last, -1);
+    const cdot_blk_t *mw = cdot_prev_used(last, mf);
+    ESP_LOGW(TAG, "[CAM-DMA-OWNER-R1B] END seq=%u marks=%u printed=%u dma=%u/%u maxfree=%p/%u heap=%d wall=%p/%u gap=%d",
+             (unsigned)s_cdot.seq, (unsigned)s_cdot.mark_no, (unsigned)s_cdot.printed,
+             (unsigned)dma_free(), (unsigned)dma_largest(),
+             mf ? (void *)mf->ptr : NULL, mf ? (unsigned)mf->size : 0U,
+             mf ? (int)mf->heap : -1,
+             mw ? (void *)mw->ptr : NULL, mw ? (unsigned)mw->size : 0U, cdot_gap(mw, mf));
+    s_cdot.active = false;
+}
+#undef s_cdot
+#else
+static inline void cdot_r1_begin(const char *profile_name) { (void)profile_name; }
+static inline void cdot_r1_mark(const char *stage) { (void)stage; }
+static inline void cdot_r1_end(const char *stage) { (void)stage; }
+#endif /* CAM_DMA_OWNER_TRACE_R1 */
 
 /* [DMA-HEAP-TRACE-DIAG 2026-08-24]
  * One-shot diagnostic for the 720p60 -> 1080p contiguous INTERNAL heap loss.
@@ -2994,24 +3853,592 @@ static inline void cam_dma_trace_start_720_once(camera_h264_profile_t profile_id
 {
     (void)profile_id;
 }
-static inline void cam_dma_trace_mark(const char *stage) { (void)stage; }
+static inline void cam_dma_trace_mark(const char *stage) { cdot_r1_mark(stage); } /* [CAM-DMA-OWNER-TRACE-R1] */
 static inline void cam_dma_trace_pause_for_720_cleanup(camera_h264_profile_t profile_id) { (void)profile_id; }
 static inline void cam_dma_trace_dump_after_720_cleanup(void) { }
 static inline void cam_dma_trace_finish_after_video_deinit(const char *reason) { (void)reason; }
 #endif
 
-static void camera_h264_live_task(void *arg)
+/* [CAM-LIVE-PERSISTENT-WORKER-R22-20260920]
+ * Run one complete camera/H.264 generation on the permanent static worker.
+ * The worker task itself is never deleted/recreated between profile switches;
+ * only the per-generation V4L2/H.264 resources below are opened and cleaned up.
+ * This avoids reusing the same StaticTask_t/stack while FreeRTOS may still be
+ * finishing the previous task's self-delete path. */
+/* [LCD-DSI-BLACKBOX-R7A-20261003]
+ * Read-only DSI scanout blackbox derived from Claude R7.
+ *
+ * Live path: sample silently into a PSRAM-only ring.
+ * STOP path: dump the chronological ring to UART after camera streaming has ended.
+ * No register writes, no new task/timer, no Core1 work.
+ */
+#ifndef LCD_DSI_PROBE_R7
+#define LCD_DSI_PROBE_R7 1
+#endif
+#if LCD_DSI_PROBE_R7
+#include "soc/mipi_dsi_host_struct.h"
+#include "soc/mipi_dsi_bridge_struct.h"
+#include "soc/dw_gdma_struct.h"
+#include "soc/hp_sys_clkrst_struct.h"
+
+#define R7_ST1_LINK_MASK          0x0000007Fu
+#define R7_ST1_DPI_PLD_WR_ERR     (1u << 7)
+#define R7_ST1_DPI_BUFF_PLD_UNDER (1u << 19)
+#define R7_PKT_FULL_MASK          ((1u << 1) | (1u << 3) | (1u << 17))
+#define R7_BRG_UNDERRUN_RAW       (1u << 0)
+#define R7_CFG_WORDS              13
+
+#define R7A_BB_CAP                2048u
+#define R7A_TRIG_ST0              (1u << 0)
+#define R7A_TRIG_ST1              (1u << 1)
+#define R7A_TRIG_BRG_UR           (1u << 2)
+#define R7A_TRIG_PKT_FULL         (1u << 3)
+#define R7A_TRIG_CHEN_OFF         (1u << 4)
+#define R7A_TRIG_CFG_CHANGE       (1u << 5)
+
+typedef struct {
+    uint32_t seq;
+    uint32_t rel_us;
+    uint32_t st0;
+    uint32_t st1;
+    uint32_t pkt;
+    uint32_t brg_raw;
+    uint32_t depth;
+    uint32_t chen;
+    uint32_t sar;
+    uint32_t phy;
+    uint32_t clk02;
+    uint32_t clk03;
+    uint32_t rst0;
+    uint32_t cfg_diff;
+    uint32_t reason;
+} lcd_dsibb_r7a_rec_t;
+
+typedef struct {
+    bool active;
+    int8_t dsi_ch;
+    uint8_t st_mode;
+    uint32_t fb_lo, fb_hi;
+    uint32_t cfg_before[R7_CFG_WORDS];
+
+    lcd_dsibb_r7a_rec_t *bb;
+    uint32_t bb_head;
+    uint32_t bb_count;
+    uint32_t bb_seq;
+    int64_t bb_t0_us;
+
+    bool trigger_seen;
+    uint32_t trigger_seq;
+    uint32_t trigger_reason;
+
+    uint32_t t_st0_hits;
+    uint32_t t_st1_hits;
+    uint32_t t_under;
+    uint32_t t_wr;
+    uint32_t t_link;
+    uint32_t t_brg_ur;
+    uint32_t t_full;
+    uint32_t t_chen_off;
+    uint32_t t_cfg_change;
+    uint32_t t_depth_min;
+    uint32_t t_depth_max;
+} lcd_dsiprobe_r7_t;
+
+static void lcd_dsiprobe_r7_read_cfg(uint32_t out[R7_CFG_WORDS])
 {
-    (void)arg;
+    out[0]  = HP_SYS_CLKRST.peri_clk_ctrl02.val;
+    out[1]  = HP_SYS_CLKRST.peri_clk_ctrl03.val;
+    out[2]  = HP_SYS_CLKRST.soc_clk_ctrl1.val;
+    out[3]  = HP_SYS_CLKRST.hp_rst_en0.val;
+    out[4]  = MIPI_DSI_BRIDGE.en.val;
+    out[5]  = MIPI_DSI_BRIDGE.dpi_misc_config.val;
+    out[6]  = MIPI_DSI_BRIDGE.dpi_rsv_dpi_data.val;
+    out[7]  = MIPI_DSI_BRIDGE.dpi_h_cfg0.val;
+    out[8]  = MIPI_DSI_BRIDGE.dpi_h_cfg1.val;
+    out[9]  = MIPI_DSI_BRIDGE.dpi_v_cfg0.val;
+    out[10] = MIPI_DSI_BRIDGE.dpi_v_cfg1.val;
+    out[11] = MIPI_DSI_BRIDGE.dma_req_cfg.val;
+    out[12] = MIPI_DSI_HOST.vid_mode_cfg.val;
+}
+
+/* [LCD-DSI-BLACKBOX-R7B-FPFIX-20261003] false positive #1:
+ * CSI STREAMON legitimately sets these bits (IDF v5.5.4 hp_sys_clkrst_struct.h):
+ *   peri_clk_ctrl03 [3:2] mipi_csi_dphy_clk_src_sel, [4] mipi_csi_dphy_cfg_clk_en
+ *   soc_clk_ctrl1   [10] csi_brg_sys_clk_en, [11] csi_host_sys_clk_en
+ *   hp_rst_en0      [27] rst_en_csi_host, [28] rst_en_csi_brg, [29] rst_en_isp
+ * They are not part of the DSI scanout path, so they are masked out of cfgdiff. */
+static const uint32_t k_r7_cfg_mask[R7_CFG_WORDS] = {
+    0xFFFFFFFFu,  /* 0 peri_clk_ctrl02 */
+    0xFFFFFFE3u,  /* 1 peri_clk_ctrl03 (CSI bits 4..2 excluded) */
+    0xFFFFF3FFu,  /* 2 soc_clk_ctrl1   (CSI bits 11..10 excluded) */
+    0xC7FFFFFFu,  /* 3 hp_rst_en0      (CSI/ISP bits 29..27 excluded) */
+    0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+    0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+};
+
+static uint32_t lcd_dsiprobe_r7_cfg_diff(const lcd_dsiprobe_r7_t *p)
+{
+    uint32_t cfg[R7_CFG_WORDS];
+    uint32_t diff = 0;
+    lcd_dsiprobe_r7_read_cfg(cfg);
+    for (int i = 0; i < R7_CFG_WORDS; ++i) {
+        if ((cfg[i] ^ p->cfg_before[i]) & k_r7_cfg_mask[i]) diff |= (1u << i);
+    }
+    return diff;
+}
+
+static void lcd_dsiprobe_r7_snapshot(lcd_dsiprobe_r7_t *p, const char *snap)
+{
+    if (!p->active) {
+        ESP_LOGW(TAG, "[LCD-DSI-BLACKBOX-R7A] %s skipped (inactive)", snap);
+        return;
+    }
+
+    uint32_t cfg[R7_CFG_WORDS];
+    lcd_dsiprobe_r7_read_cfg(cfg);
+    uint32_t diff_mask = 0;
+    for (int i = 0; i < R7_CFG_WORDS; ++i) {
+        if ((cfg[i] ^ p->cfg_before[i]) & k_r7_cfg_mask[i]) diff_mask |= (1u << i);  /* [R7B-FPFIX] */
+    }
+
+    const uint32_t st0 = MIPI_DSI_HOST.int_st0.val;
+    const uint32_t st1 = MIPI_DSI_HOST.int_st1.val;
+
+    ESP_LOGW(TAG,
+             "[LCD-DSI-BLACKBOX-R7A] %s cfgdiff=0x%04" PRIx32
+             " clk02=%08" PRIx32 " clk03=%08" PRIx32 " socclk1=%08" PRIx32 " rst0=%08" PRIx32
+             " brg_en=%08" PRIx32 " depth=%u brg_raw=%08" PRIx32
+             " phy=%08" PRIx32 " pkt=%08" PRIx32 " st0=%08" PRIx32 " st1=%08" PRIx32
+             " chen=%08" PRIx32 " dsi_ch=%d sar=%08" PRIx32,
+             snap, diff_mask, cfg[0], cfg[1], cfg[2], cfg[3], cfg[4],
+             (unsigned)MIPI_DSI_BRIDGE.fifo_flow_status.raw_buf_depth,
+             MIPI_DSI_BRIDGE.int_raw.val, MIPI_DSI_HOST.phy_status.val,
+             MIPI_DSI_HOST.vid_pkt_status.val, st0, st1, DW_GDMA.chen0.val,
+             (int)p->dsi_ch,
+             (p->dsi_ch >= 0) ? DW_GDMA.ch[p->dsi_ch].sar0.val : 0u);
+}
+
+static void lcd_dsiprobe_r7_init(lcd_dsiprobe_r7_t *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->dsi_ch = -1;
+    p->t_depth_min = UINT32_MAX;
+
+    esp_lcd_panel_handle_t panel = camera_diag_lvgl_get_panel(lv_display_get_default());
+    void *fb0 = NULL;
+    if (panel && esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb0) == ESP_OK && fb0) {
+        p->fb_lo = (uint32_t)(uintptr_t)fb0;
+        p->fb_hi = p->fb_lo + (uint32_t)(BSP_LCD_H_RES * BSP_LCD_V_RES * 2);
+    }
+
+    const uint32_t chen = DW_GDMA.chen0.val;
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t sar = DW_GDMA.ch[i].sar0.val;
+        if ((chen & (1u << i)) && p->fb_lo && sar >= p->fb_lo && sar <= p->fb_hi) {
+            p->dsi_ch = (int8_t)i;
+            break;
+        }
+    }
+
+    const uint32_t a0 = MIPI_DSI_HOST.int_st0.val;
+    const uint32_t a1 = MIPI_DSI_HOST.int_st1.val;
+    const uint32_t b0 = MIPI_DSI_HOST.int_st0.val;
+    const uint32_t b1 = MIPI_DSI_HOST.int_st1.val;
+    if ((a0 | a1) != 0) {
+        p->st_mode = ((b0 | b1) == 0) ? 1 :
+                     (((a0 == b0) && (a1 == b1)) ? 2 : 0);
+    }
+
+    lcd_dsiprobe_r7_read_cfg(p->cfg_before);
+
+    const size_t dma_free_before =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    const size_t dma_largest_before =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+
+    p->bb = (lcd_dsibb_r7a_rec_t *)heap_caps_calloc(
+        R7A_BB_CAP, sizeof(lcd_dsibb_r7a_rec_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    const size_t dma_free_after =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    const size_t dma_largest_after =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+
+    if (!p->bb) {
+        ESP_LOGE(TAG,
+                 "[LCD-DSI-BLACKBOX-R7A] PSRAM ring allocation failed bytes=%u; probe disabled",
+                 (unsigned)(R7A_BB_CAP * sizeof(lcd_dsibb_r7a_rec_t)));
+        return;
+    }
+
+    p->bb_t0_us = esp_timer_get_time();
+    p->active = true;
+
+    ESP_LOGW(TAG,
+             "[LCD-DSI-BLACKBOX-R7A] INIT ring=%u rec=%u bytes=%u PSRAM_ONLY"
+             " panel=%p fb=%08" PRIx32 "..%08" PRIx32 " dsi_ch=%d"
+             " st_mode=%u boot=%08" PRIx32 "/%08" PRIx32 " reread=%08" PRIx32 "/%08" PRIx32
+             " DMA=%u/%u->%u/%u",
+             (unsigned)R7A_BB_CAP, (unsigned)sizeof(lcd_dsibb_r7a_rec_t),
+             (unsigned)(R7A_BB_CAP * sizeof(lcd_dsibb_r7a_rec_t)),
+             (void *)panel, p->fb_lo, p->fb_hi, (int)p->dsi_ch,
+             (unsigned)p->st_mode, a0, a1, b0, b1,
+             (unsigned)dma_free_before, (unsigned)dma_largest_before,
+             (unsigned)dma_free_after, (unsigned)dma_largest_after);
+}
+
+/* Existing camera live loop calls this. Deliberately no UART output here. */
+static inline void lcd_dsiprobe_r7_sample(lcd_dsiprobe_r7_t *p, int64_t now_us)
+{
+    if (!p->active || !p->bb) return;
+
+    lcd_dsibb_r7a_rec_t r = {0};
+    r.seq = p->bb_seq++;
+    r.rel_us = (uint32_t)(now_us - p->bb_t0_us);
+    r.st0 = MIPI_DSI_HOST.int_st0.val;
+    r.st1 = MIPI_DSI_HOST.int_st1.val;
+    r.pkt = MIPI_DSI_HOST.vid_pkt_status.val;
+    r.brg_raw = MIPI_DSI_BRIDGE.int_raw.val;
+    r.depth = MIPI_DSI_BRIDGE.fifo_flow_status.raw_buf_depth;
+    r.chen = DW_GDMA.chen0.val;
+    r.sar = (p->dsi_ch >= 0) ? DW_GDMA.ch[p->dsi_ch].sar0.val : 0u;
+    r.phy = MIPI_DSI_HOST.phy_status.val;
+    r.clk02 = HP_SYS_CLKRST.peri_clk_ctrl02.val;
+    r.clk03 = HP_SYS_CLKRST.peri_clk_ctrl03.val;
+    r.rst0 = HP_SYS_CLKRST.hp_rst_en0.val;
+    r.cfg_diff = lcd_dsiprobe_r7_cfg_diff(p);
+
+    if (r.st0) r.reason |= R7A_TRIG_ST0;
+    if (r.st1) r.reason |= R7A_TRIG_ST1;
+    if (r.brg_raw & R7_BRG_UNDERRUN_RAW) r.reason |= R7A_TRIG_BRG_UR;
+    /* [LCD-DSI-BLACKBOX-R7B-FPFIX-20261003] false positive #2:
+     * R7_PKT_FULL_MASK = dpi_cmd_w_full[1] | dpi_pld_w_full[3] | dpi_buff_pld_full[17]
+     * (IDF v5.5.4 mipi_dsi_host_struct.h vid_pkt_status). Full = host buffer
+     * filled ahead of the link = healthy back-pressure, seen in 144/210 normal
+     * samples. Still counted in t_full, no longer a trigger reason. */
+    if (p->dsi_ch >= 0 && !(r.chen & (1u << p->dsi_ch))) r.reason |= R7A_TRIG_CHEN_OFF;
+    if (r.cfg_diff) r.reason |= R7A_TRIG_CFG_CHANGE;
+
+    p->bb[p->bb_head] = r;
+    p->bb_head = (p->bb_head + 1u) % R7A_BB_CAP;
+    if (p->bb_count < R7A_BB_CAP) p->bb_count++;
+
+    if (!p->trigger_seen && r.reason) {
+        p->trigger_seen = true;
+        p->trigger_seq = r.seq;
+        p->trigger_reason = r.reason;
+    }
+
+    if (r.st0) p->t_st0_hits++;
+    if (r.st1) {
+        p->t_st1_hits++;
+        if (r.st1 & R7_ST1_DPI_BUFF_PLD_UNDER) p->t_under++;
+        if (r.st1 & R7_ST1_DPI_PLD_WR_ERR) p->t_wr++;
+        if (r.st1 & R7_ST1_LINK_MASK) p->t_link++;
+    }
+    if (r.brg_raw & R7_BRG_UNDERRUN_RAW) p->t_brg_ur++;
+    if (r.pkt & R7_PKT_FULL_MASK) p->t_full++;
+    if (r.reason & R7A_TRIG_CHEN_OFF) p->t_chen_off++;
+    if (r.cfg_diff) p->t_cfg_change++;
+    if (r.depth < p->t_depth_min) p->t_depth_min = r.depth;
+    if (r.depth > p->t_depth_max) p->t_depth_max = r.depth;
+}
+
+/* Runs after camera STOP. Dumping here cannot perturb the original live event. */
+static void lcd_dsiprobe_r7_finish(lcd_dsiprobe_r7_t *p)
+{
+    if (!p->active) return;
+
+    ESP_LOGW(TAG,
+             "[LCD-DSI-BLACKBOX-R7A] TOTAL samples=%u stored=%u trigger=%u trig_seq=%u reason=0x%02" PRIx32
+             " st0=%u st1=%u under=%u wr=%u link=%u brg_ur=%u full=%u chen_off=%u cfgchg=%u depth=%u..%u",
+             (unsigned)p->bb_seq, (unsigned)p->bb_count,
+             p->trigger_seen ? 1u : 0u, (unsigned)p->trigger_seq, p->trigger_reason,
+             (unsigned)p->t_st0_hits, (unsigned)p->t_st1_hits,
+             (unsigned)p->t_under, (unsigned)p->t_wr, (unsigned)p->t_link,
+             (unsigned)p->t_brg_ur, (unsigned)p->t_full,
+             (unsigned)p->t_chen_off, (unsigned)p->t_cfg_change,
+             (unsigned)(p->t_depth_min == UINT32_MAX ? 0u : p->t_depth_min),
+             (unsigned)p->t_depth_max);
+
+    if (HA_LOG_DIAG_LCD_RAW_DUMP) {
+        ESP_LOGW(TAG,
+                 "[LCD-DSI-BLACKBOX-R7A] DUMP-BEGIN count=%u fields="
+                 "seq,us,reason,st0,st1,brg,pkt,depth,chen,sar,phy,clk02,clk03,rst0,cfgdiff",
+                 (unsigned)p->bb_count);
+
+        const uint32_t first = (p->bb_count == R7A_BB_CAP) ? p->bb_head : 0u;
+        for (uint32_t i = 0; i < p->bb_count; ++i) {
+            const lcd_dsibb_r7a_rec_t *r = &p->bb[(first + i) % R7A_BB_CAP];
+            ESP_LOGI(TAG,
+                     "[LCD-DSI-BLACKBOX-R7A] B,%u,%u,%02" PRIx32 ",%08" PRIx32 ",%08" PRIx32
+                     ",%08" PRIx32 ",%08" PRIx32 ",%u,%08" PRIx32 ",%08" PRIx32
+                     ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%04" PRIx32,
+                     (unsigned)r->seq, (unsigned)r->rel_us, r->reason,
+                     r->st0, r->st1, r->brg_raw, r->pkt, (unsigned)r->depth,
+                     r->chen, r->sar, r->phy, r->clk02, r->clk03, r->rst0, r->cfg_diff);
+        }
+        ESP_LOGW(TAG, "[LCD-DSI-BLACKBOX-R7A] DUMP-END");
+    } else {
+        ESP_LOGW(TAG, "[LCD-DSI-BLACKBOX-R7A] raw dump suppressed (set HA_LOG_DIAG_LCD_RAW_DUMP=1 to enable)");
+    }
+    heap_caps_free(p->bb);
+    p->bb = NULL;
+    p->active = false;
+}
+#endif /* LCD_DSI_PROBE_R7 */
+
+/* [LCD-DSI-FRAMEBB-R7B-20261003]
+ * Application side of the per-frame DSI blackbox that lives in the patched
+ * IDF esp_lcd_panel_dpi.c (mipi_dsi_dma_trans_done_cb). This file only arms,
+ * marks and dumps it from task context; it never registers LCD callbacks.
+ * Requires the patched IDF file: with the original IDF the link fails
+ * (undefined g_lcd_dsi_r7b) -> set LCD_DSI_FRAMEBB_R7B 0 or restore both. */
+#ifndef LCD_DSI_FRAMEBB_R7B
+#define LCD_DSI_FRAMEBB_R7B 0
+#endif
+#if LCD_DSI_FRAMEBB_R7B
+#if !LCD_DSI_PROBE_R7
+#error "LCD_DSI_FRAMEBB_R7B needs LCD_DSI_PROBE_R7 (dsi_ch detection)"
+#endif
+/* Must stay byte-identical with the IDF side; checked at arm via sizeof. */
+#define LCD_DSI_R7B_RING_N        256u
+#define LCD_DSI_R7B_F_PERIOD      (1u << 0)
+#define LCD_DSI_R7B_F_SAR         (1u << 1)
+#define LCD_DSI_R7B_F_BRG_UR      (1u << 2)
+#define LCD_DSI_R7B_F_CLKRST      (1u << 3)
+#define LCD_DSI_R7B_F_RESTART     (1u << 4)
+#define LCD_DSI_R7B_F_CHEN_ON     (1u << 5)
+#define LCD_DSI_R7B_F_FIRST       (1u << 6)
+
+typedef struct {
+    uint32_t dcyc;
+    uint32_t sar_end;
+    uint16_t depth;
+    uint16_t phy;
+    uint8_t  chen;
+    uint8_t  flags;
+    uint16_t seq16;
+} lcd_dsi_r7b_rec_t;
+
+typedef struct {
+    volatile uint32_t armed;
+    volatile int32_t  dsi_ch;
+    volatile uint32_t seq;
+    volatile uint32_t wr_next;
+    volatile uint32_t frozen;
+    volatile uint32_t trig_seq;
+    volatile uint32_t trig_flags;
+    volatile uint32_t post_left;
+    uint32_t last_cyc;
+    uint32_t ref_dcyc;
+    uint32_t ref_sar[3];
+    uint32_t ref_clk03, ref_soc1, ref_rst0;
+    uint32_t dcyc_min, dcyc_max, depth_min;
+    uint32_t n_period, n_sar, n_brg_ur, n_clkrst, n_restart, n_chen_on;
+    lcd_dsi_r7b_rec_t ring[LCD_DSI_R7B_RING_N];
+} lcd_dsi_r7b_t;
+
+_Static_assert(sizeof(lcd_dsi_r7b_rec_t) == 16, "R7B record must be 16 bytes");
+
+extern lcd_dsi_r7b_t g_lcd_dsi_r7b;
+extern const uint32_t g_lcd_dsi_r7b_sizeof;
+extern const uint32_t g_lcd_dsi_r7b_ring_n;
+
+static bool s_r7b_armed_by_us;
+
+/* x10 microseconds from CPU cycles (CPU clock from sdkconfig, 360 MHz on this board) */
+static inline uint32_t lcd_dsi_r7b_cyc_to_us10(uint32_t cyc)
+{
+    return (uint32_t)(((uint64_t)cyc * 10u) / (uint32_t)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+}
+
+static void lcd_dsi_r7b_arm(int dsi_ch)
+{
+    lcd_dsi_r7b_t *const bb = &g_lcd_dsi_r7b;
+    s_r7b_armed_by_us = false;
+    if (g_lcd_dsi_r7b_sizeof != (uint32_t)sizeof(lcd_dsi_r7b_t) ||
+        g_lcd_dsi_r7b_ring_n != LCD_DSI_R7B_RING_N) {
+        ESP_LOGE(TAG, "[LCD-DSI-FRAMEBB-R7B] ARM refused: layout mismatch idf=%u/%u app=%u/%u",
+                 (unsigned)g_lcd_dsi_r7b_sizeof, (unsigned)g_lcd_dsi_r7b_ring_n,
+                 (unsigned)sizeof(lcd_dsi_r7b_t), (unsigned)LCD_DSI_R7B_RING_N);
+        return;
+    }
+    if (dsi_ch < 0 || dsi_ch > 3) {
+        ESP_LOGE(TAG, "[LCD-DSI-FRAMEBB-R7B] ARM refused: dsi_ch=%d", dsi_ch);
+        return;
+    }
+    if (__atomic_load_n(&bb->armed, __ATOMIC_ACQUIRE)) {
+        /* Left armed by an earlier session: idle the ISR side for >2 frames first. */
+        __atomic_store_n(&bb->armed, 0u, __ATOMIC_RELEASE);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    memset((void *)bb, 0, sizeof(*bb));
+    bb->dcyc_min = UINT32_MAX;
+    bb->depth_min = UINT32_MAX;
+    bb->dsi_ch = dsi_ch;
+    __atomic_store_n(&bb->armed, 1u, __ATOMIC_RELEASE);
+    s_r7b_armed_by_us = true;
+    ESP_LOGW(TAG, "[LCD-DSI-FRAMEBB-R7B] ARM dsi_ch=%d ring=%u rec=%u bytes=%u internal-bss cpu_mhz=%u",
+             dsi_ch, (unsigned)LCD_DSI_R7B_RING_N, (unsigned)sizeof(lcd_dsi_r7b_rec_t),
+             (unsigned)sizeof(lcd_dsi_r7b_t), (unsigned)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+}
+
+static void lcd_dsi_r7b_mark(const char *what)
+{
+    if (!s_r7b_armed_by_us) return;
+    lcd_dsi_r7b_t *const bb = &g_lcd_dsi_r7b;
+    ESP_LOGW(TAG, "[LCD-DSI-FRAMEBB-R7B] MARK %s seq=%u trig=%u trig_seq=%u frozen=%u",
+             what, (unsigned)bb->seq, (unsigned)(bb->trig_flags != 0u),
+             (unsigned)bb->trig_seq, (unsigned)bb->frozen);
+}
+
+/* Called first thing in live_cleanup: stops recording before teardown work. */
+static void lcd_dsi_r7b_disarm(void)
+{
+    if (!s_r7b_armed_by_us) return;
+    lcd_dsi_r7b_t *const bb = &g_lcd_dsi_r7b;
+    const uint32_t seq_at = bb->seq;
+    __atomic_store_n(&bb->armed, 0u, __ATOMIC_RELEASE);
+    ESP_LOGW(TAG, "[LCD-DSI-FRAMEBB-R7B] DISARM seq=%u", (unsigned)seq_at);
+}
+
+/* Called after the R7A dump; ISR side has been idle since disarm. */
+static void lcd_dsi_r7b_dump(void)
+{
+    if (!s_r7b_armed_by_us) return;
+    s_r7b_armed_by_us = false;
+    lcd_dsi_r7b_t *const bb = &g_lcd_dsi_r7b;
+    vTaskDelay(pdMS_TO_TICKS(50));   /* any in-flight ISR finished (>2 frames) */
+
+    const uint32_t wr = bb->wr_next;
+    const uint32_t n = (wr < LCD_DSI_R7B_RING_N) ? wr : LCD_DSI_R7B_RING_N;
+    const uint32_t first = wr - n;
+
+    ESP_LOGW(TAG,
+             "[LCD-DSI-FRAMEBB-R7B] TOTAL frames=%u written=%u dumped=%u frozen=%u"
+             " trig=%u trig_seq=%u trig_flags=0x%02x"
+             " n_period=%u n_sar=%u n_brg_ur=%u n_clkrst=%u n_restart=%u n_chen_on=%u",
+             (unsigned)bb->seq, (unsigned)wr, (unsigned)n, (unsigned)bb->frozen,
+             (unsigned)(bb->trig_flags != 0u), (unsigned)bb->trig_seq, (unsigned)bb->trig_flags,
+             (unsigned)bb->n_period, (unsigned)bb->n_sar, (unsigned)bb->n_brg_ur,
+             (unsigned)bb->n_clkrst, (unsigned)bb->n_restart, (unsigned)bb->n_chen_on);
+    {
+        const uint32_t ref10 = lcd_dsi_r7b_cyc_to_us10(bb->ref_dcyc);
+        const uint32_t mn10 = (bb->dcyc_min == UINT32_MAX) ? 0u : lcd_dsi_r7b_cyc_to_us10(bb->dcyc_min);
+        const uint32_t mx10 = lcd_dsi_r7b_cyc_to_us10(bb->dcyc_max);
+        ESP_LOGW(TAG,
+                 "[LCD-DSI-FRAMEBB-R7B] REF period_us=%u.%u min=%u.%u max=%u.%u depth_min=%u"
+                 " sar_ref=%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32
+                 " clk03=%08" PRIx32 " soc1=%08" PRIx32 " rst0=%08" PRIx32,
+                 (unsigned)(ref10 / 10u), (unsigned)(ref10 % 10u),
+                 (unsigned)(mn10 / 10u), (unsigned)(mn10 % 10u),
+                 (unsigned)(mx10 / 10u), (unsigned)(mx10 % 10u),
+                 (unsigned)(bb->depth_min == UINT32_MAX ? 0u : bb->depth_min),
+                 bb->ref_sar[0], bb->ref_sar[1], bb->ref_sar[2],
+                 bb->ref_clk03, bb->ref_soc1, bb->ref_rst0);
+    }
+    if (bb->trig_flags == 0u) {
+        ESP_LOGW(TAG, "[LCD-DSI-FRAMEBB-R7B] no trigger: frame rows suppressed");
+    } else {
+        uint32_t dump_first = first;
+        uint32_t dump_last = wr; /* exclusive */
+        if (!HA_LOG_DIAG_LCD_RAW_DUMP) {
+            const uint32_t pre = 32u;
+            const uint32_t post = 33u; /* includes trigger + 32 after */
+            dump_first = (bb->trig_seq > pre) ? (bb->trig_seq - pre) : 0u;
+            if (dump_first < first) dump_first = first;
+            dump_last = bb->trig_seq + post;
+            if (dump_last > wr) dump_last = wr;
+        }
+        ESP_LOGW(TAG,
+                 "[LCD-DSI-FRAMEBB-R7B] DUMP-BEGIN count=%u range=%u..%u trigger=%u fields=seq,dt_us,sar_end,depth,phy,chen,flags,ok",
+                 (unsigned)(dump_last - dump_first), (unsigned)dump_first,
+                 (unsigned)(dump_last ? dump_last - 1u : 0u), (unsigned)bb->trig_seq);
+        for (uint32_t s = dump_first; s < dump_last; ++s) {
+            const lcd_dsi_r7b_rec_t *r = &bb->ring[s & (LCD_DSI_R7B_RING_N - 1u)];
+            const uint32_t dt10 = lcd_dsi_r7b_cyc_to_us10(r->dcyc);
+            ESP_LOGI(TAG, "[LCD-DSI-FRAMEBB-R7B] F,%u,%u.%u,%08" PRIx32 ",%u,%04x,%x,%02x,%u",
+                     (unsigned)s, (unsigned)(dt10 / 10u), (unsigned)(dt10 % 10u),
+                     r->sar_end, (unsigned)r->depth, (unsigned)r->phy,
+                     (unsigned)r->chen, (unsigned)r->flags,
+                     (unsigned)(r->seq16 == (uint16_t)s));
+        }
+        ESP_LOGW(TAG, "[LCD-DSI-FRAMEBB-R7B] DUMP-END");
+    }
+}
+#endif /* LCD_DSI_FRAMEBB_R7B */
+
+/* [LCD-LIVE-AB-MODE-R4-20261002] diagnostic selector for the live camera session
+ *   0 = off (production behaviour: LVGL running, framebuffer scanout ON)
+ *   1 = R3: DSI BAR_VERTICAL pattern (scanout OFF + LVGL timer stopped)
+ *   2 = R4: LVGL timer stopped ONLY; PSRAM framebuffer scanout stays ON
+ * Only one variable differs between 1 and 2: whether DW-GDMA reads the
+ * PSRAM framebuffer. Backlight/LEDC, DSI PHY, camera/H264/audio untouched. */
+/*   3 = R5: production LVGL + scanout ON; ONLY the AXI-ICM read priority of
+ *       DW-GDMA memory master port 1 (reg_gdma_mst2_arqos) is raised to 15.
+ *       Source: dw_gdma_ll.h DW_GDMA_LL_MASTER_PORT_MEMORY=1 (PSRAM side of
+ *       both DSI scanout READ and CSI WRITE); axi_icm_ll.h master_port 1 ->
+ *       reg_gdma_mst2_*. AXI read/write channels are independent, so the CSI
+ *       write priority (awqos) is left untouched. Restored in live_cleanup. */
+#ifndef LCD_LIVE_AB_MODE
+#define LCD_LIVE_AB_MODE 0 /* [LCD-PCLK-AB-R6] R5 QoS off; production LCD path */
+#endif
+#define LCD_DSIQOS_R5_READ_PRIO 15u
+
+static bool camera_h264_live_run_once(bool allow_owner_retry)
+{
+
+    /* [DMA-CAM-START-R9-20260919]
+     * Sample the literal first task instruction before any camera/profile work.
+     * Keep these as local scalar snapshots and emit only one consolidated log
+     * later, so the probe itself does not introduce heap allocations/timing
+     * noise in the 31KB -> 28KB transition window. */
+    const size_t r9_a0_free = dma_free();
+    const size_t r9_a0_largest = dma_largest();
+
     int cam_fd = -1;
     int enc_fd = -1;
     bool cam_streaming = false;
     bool enc_out_streaming = false;
     bool enc_cap_streaming = false;
     bool lcd_stream_flag = false;
+    /* [LCDPAT-LIVE-AB-R3]
+     * Diagnostic only: while the live camera owns the stream, replace the
+     * PSRAM framebuffer scanout with the DSI host BAR_VERTICAL generator.
+     * DSI PHY/timing remains active; framebuffer/GDMA reads are removed. */
+    lv_display_t *lcdpat_live_display = NULL;
+    esp_lcd_panel_handle_t lcdpat_live_panel = NULL;
+    bool lcdpat_live_active = false;
+    bool lcdpat_live_lvgl_timer_paused = false;
+    bool dsiqos_r5_active = false;          /* [LCD-DSIQOS-LIVE-AB-R5] */
+    uint8_t dsiqos_r5_saved_r = 0;
+    uint8_t dsiqos_r5_saved_w = 0;
+#if LCD_DSI_PROBE_R7
+    lcd_dsiprobe_r7_t r7_probe = {0};      /* [LCD-DSIPROBE-R7] read-only, stack-local */
+#endif
     bool owner_ref_held = false;   /* [OWNER-REF-GUARD 2026-09-11] */
     cam_map_buf_t cam_maps[CAM_CSI_BUFFER_COUNT] = {0};
     uint32_t cam_mapped_count = 0;
+
+    /* [CAM-USERPTR-ARENA-R2A-LIVE-ENSURE-20261004]
+     * The page-level DMA bootstrap normally reserves the permanent USERPTR
+     * arena before a browser starts media.  A direct/reused signaling path can
+     * start live media without passing through that page handler, however.
+     * Ensure the same one-time arena reserve here before selecting MMAP vs
+     * USERPTR.  cam_userptr_arena_reserve() is idempotent: if bootstrap already
+     * reserved it, this is a no-op; if reserve fails, the proven MMAP path is
+     * retained exactly as the fail-open fallback. */
+    if (!cam_userptr_arena_ready()) {
+        const bool arena_ok = cam_userptr_arena_reserve();
+        ESP_LOGW(TAG,
+                 "[CAM-USERPTR-ARENA-R2A-LIVE-ENSURE] reserve=%s ready=%u",
+                 arena_ok ? "PASS" : "FAIL",
+                 cam_userptr_arena_ready() ? 1U : 0U);
+    }
+    const bool cam_userptr_active = cam_userptr_arena_ready();
+    const int cam_memory = cam_userptr_active ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
     void *enc_map = NULL;
     size_t enc_map_len = 0;
     int saved_errno = 0;
@@ -3041,13 +4468,23 @@ static void camera_h264_live_task(void *arg)
     uint32_t consumer_us_max = 0;
     uint32_t loop_us_max = 0;
     uint32_t h264_bytes_max = 0;
+    /* [CAM-H264-TX-RATE-DIAG-R1-20261005]
+     * Count actual encoded H.264 bytes in the same recent window already used
+     * for CAP/ENC FPS. No allocation, timer, restart, or encoder control. */
+    uint64_t h264_window_bytes = 0;
+    uint32_t h264_tx_kbps_recent = 0;
     h264_nal_stats_t first_nal = {0};
+
+    const size_t r9_a1_free = dma_free();
+    const size_t r9_a1_largest = dma_largest();
 
     /* [720-COLOR-MATCH-YU12-DIAG-A1] 1s / 3s / 5s post-ISP samples. */
     uint8_t yu12_diag_sample_index = 0;
     static const uint32_t yu12_diag_targets_ms[] = {1000U, 3000U, 5000U};
 
     camera_h264_profile_t profile_id = camera_h264_stream_get_profile();
+    const size_t r9_a2_free = dma_free();
+    const size_t r9_a2_largest = dma_largest();
 
     /* [REF-POOL] No late ISR/anchor warm-up and no software reboot.
      * The encoder reuses the persistent boot-time H.264 reference pool. */
@@ -3057,21 +4494,33 @@ static void camera_h264_live_task(void *arg)
     const camera_live_profile_cfg_t *profile_base = camera_live_profile_cfg(profile_id);
     camera_live_profile_cfg_t profile_runtime = *profile_base;
     if (profile_id == CAMERA_H264_PROFILE_1080P) {
+        profile_runtime.qp = camera_h264_stream_get_qp();
         profile_runtime.gop = camera_h264_stream_get_gop();
+        profile_runtime.stage = (profile_runtime.qp == 30U && profile_runtime.gop == 5U) ?
+            "streaming_1080p_qp30_gop5_good" : "streaming_1080p_qp32_gop15_lte";
     }
     const camera_live_profile_cfg_t *profile = &profile_runtime;
     /* Production fixed-QP policy:
-     *   1080p = QP35 (existing validated production value)
-     *   720p  = QP39 (2026-09-13 final matrix result)
+     *   1080p GOOD/Wi-Fi = QP30/GOP5
+     *   1080p LTE 1Mbps  = QP32/GOP15
+     *   720p             = QP39/GOP8
      * min_qp == max_qp intentionally keeps the H.264 RC object disabled. */
     const uint32_t live_qp_min = profile->qp;
     const uint32_t live_qp_max = profile->qp;
     const char *live_qp_mode = "fixed";
+    const size_t r9_a3_free = dma_free();
+    const size_t r9_a3_largest = dma_largest();
 
     const size_t dma0 = dma_free();
     size_t largest0 = dma_largest();  /* mutable: may be re-sampled after esp_video_deinit defrag */
     const size_t ps0 = psram_free();
-    ESP_LOGW(TAG, "[DMA-DIAG D3 camera_task_entry] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D3 camera_task_entry] free=%u largest=%u",
+             (unsigned)dma0, (unsigned)largest0);
+    CAM_DETAIL_DIAG("[DMA-CAM-START-R9] TASK A0_first=%u/%u A1_locals=%u/%u A2_profile_id=%u/%u A3_profile_cfg=%u/%u D3=%u/%u",
+             (unsigned)r9_a0_free, (unsigned)r9_a0_largest,
+             (unsigned)r9_a1_free, (unsigned)r9_a1_largest,
+             (unsigned)r9_a2_free, (unsigned)r9_a2_largest,
+             (unsigned)r9_a3_free, (unsigned)r9_a3_largest,
              (unsigned)dma0, (unsigned)largest0);
     ESP_LOGI(TAG, "LIVE start profile=%s target=%ux%u@%u lanes=%u GOP=%u QP=%u..%u %s dma_free=%u largest=%u psram=%u core=%d",
              profile->name, (unsigned)profile->width, (unsigned)profile->height,
@@ -3079,9 +4528,15 @@ static void camera_h264_live_task(void *arg)
              (unsigned)live_qp_min, (unsigned)live_qp_max, live_qp_mode,
              (unsigned)dma0, (unsigned)largest0,
              (unsigned)ps0, xPortGetCoreID());
+    cdot_r1_begin(profile->name);            /* [CAM-DMA-OWNER-TRACE-R1] baseline */
 
     taskENTER_CRITICAL(&s_live_mux);
     memset(&s_live.stats, 0, sizeof(s_live.stats));
+    s_live.qp_request = profile->qp;
+    s_live.gop_request = profile->gop;
+    s_live.gop_request_seq = 0;
+    s_live.gop_applied_seq = 0;
+    s_live.gop_apply_result = ESP_OK;
     s_live.stats.running = true;
     s_live.stats.dma_free = (uint32_t)dma0;
     s_live.stats.dma_largest = (uint32_t)largest0;
@@ -3097,60 +4552,133 @@ static void camera_h264_live_task(void *arg)
     lcd_ui_set_camera_stream_active(true);
     lcd_stream_flag = true;
 
-    /* [WEBRTC-SWITCH-DMA-GUARD-V2 2026-08-24]
-     * The large DMA guard is only meaningful before the first esp_video_init().
-     * Once esp_video is initialized, its persistent CSI/ISP allocations remain
-     * resident by design, so the largest free block naturally settles lower
-     * (observed ~92 KB after a clean 720p60 Stop).  Re-applying the cold-start
-     * threshold then falsely blocks a valid 720p60 -> 1080p restart.
-     *
-     * Keep the 88 KB floor for the first initialization, but on later profile
-     * switches only require the generic 32 KB CSI safety floor and let the real
-     * V4L2/H.264 allocation calls decide whether more memory is actually needed.
+#if LCD_DSI_PROBE_R7
+    /* [LCD-DSIPROBE-R7] BEFORE camera live (LCD still production state). */
+    lcd_dsiprobe_r7_init(&r7_probe);
+    lcd_dsiprobe_r7_snapshot(&r7_probe, "BEFORE");
+#endif
+#if LCD_DSI_FRAMEBB_R7B
+    lcd_dsi_r7b_arm((int)r7_probe.dsi_ch);   /* [LCD-DSI-FRAMEBB-R7B] per-frame ISR blackbox ON */
+#endif
+#if LCD_LIVE_AB_MODE == 1
+    /* [LCDPAT-LIVE-AB-R3] Enter before camera/ISP/H264 initialization. */
+    lcdpat_live_display = lv_display_get_default();
+    if (lcdpat_live_display) {
+        esp_err_t lcdpat_err = camera_diag_lcd_pattern_enter(
+            lcdpat_live_display, &lcdpat_live_panel, &lcdpat_live_lvgl_timer_paused);
+        if (lcdpat_err == ESP_OK) {
+            lcdpat_live_active = true;
+            ESP_LOGW(TAG, "[LCDPAT-LIVE-AB-R3] ENTER OK BAR_VERTICAL; framebuffer scanout bypassed");
+        } else {
+            ESP_LOGE(TAG, "[LCDPAT-LIVE-AB-R3] ENTER FAIL %s; framebuffer unchanged",
+                     esp_err_to_name(lcdpat_err));
+        }
+    } else {
+        ESP_LOGE(TAG, "[LCDPAT-LIVE-AB-R3] ENTER FAIL no default LVGL display");
+    }
+#elif LCD_LIVE_AB_MODE == 2
+    /* [LCD-LVGLSTOP-LIVE-AB-R4] Stop ONLY the LVGL timer/render/flush.
+     * The DPI panel keeps scanning the PSRAM framebuffer via DW-GDMA.
+     * lcdpat_live_panel stays NULL, so the existing cleanup path calls
+     * camera_diag_lcd_pattern_leave(NULL, &paused) = lvgl_port_resume() only. */
+    (void)lcdpat_live_display;
+    {
+        esp_err_t r4_err = lvgl_port_stop();
+        if (r4_err == ESP_OK) {
+            lcdpat_live_lvgl_timer_paused = true;
+            /* LVGL handler runs under the display lock: taking it once proves
+             * no render/flush is still in progress after the stop. */
+            const bool r4_locked = bsp_display_lock(1000);
+            if (r4_locked) {
+                bsp_display_unlock();
+            }
+            ESP_LOGW(TAG, "[LCD-LVGLSTOP-LIVE-AB-R4] ENTER OK: LVGL stopped, PSRAM framebuffer scanout ON, drain_lock=%s",
+                     r4_locked ? "ok" : "timeout");
+        } else {
+            ESP_LOGE(TAG, "[LCD-LVGLSTOP-LIVE-AB-R4] ENTER FAIL lvgl_port_stop=%s; LVGL unchanged",
+                     esp_err_to_name(r4_err));
+        }
+    }
+#elif LCD_LIVE_AB_MODE == 3
+    (void)lcdpat_live_display;
+    {
+        /* [LCD-DSIQOS-LIVE-AB-R5] single write: DW-GDMA M1 (memory port) READ prio only. */
+        const axi_qos_diag_t r5_before = axi_qos_diag_read();
+        dsiqos_r5_saved_r = r5_before.gdma_m2_r;
+        dsiqos_r5_saved_w = r5_before.gdma_m2_w;
+        axi_icm_ll_set_dw_gdma_qos_arbiter_prio(1, dsiqos_r5_saved_w, LCD_DSIQOS_R5_READ_PRIO);
+        dsiqos_r5_active = true;
+        const axi_qos_diag_t r5_after = axi_qos_diag_read();
+        ESP_LOGW(TAG, "[LCD-DSIQOS-LIVE-AB-R5] ENTER gdma_m2{r=%u->%u,w=%u->%u} ar=0x%08" PRIx32 "->0x%08" PRIx32
+                 " aw=0x%08" PRIx32 "->0x%08" PRIx32 " (LVGL ON, scanout ON)",
+                 (unsigned)dsiqos_r5_saved_r, (unsigned)r5_after.gdma_m2_r,
+                 (unsigned)dsiqos_r5_saved_w, (unsigned)r5_after.gdma_m2_w,
+                 r5_before.ar_raw, r5_after.ar_raw, r5_before.aw_raw, r5_after.aw_raw);
+    }
+#else
+    (void)lcdpat_live_display;
+#endif
+    {
+        /* [LCD-LIVE-AB-R4] READ-ONLY AXI-ICM QoS snapshot (no register writes). */
+        axi_qos_diag_t r4_q = axi_qos_diag_read();
+        axi_qos_diag_log("live-start-lcd-ab", &r4_q);
+        CAM_DETAIL_DIAG("[LCD-LIVE-AB-R4] mode=%d (0=off 1=pattern 2=lvgl-stop 3=dsi-read-qos)", (int)LCD_LIVE_AB_MODE);
+    }
+
+    /* Stable DMA guard context.
+     * After esp_video and the persistent H.264 pools are resident, the largest
+     * DMA block naturally settles much lower than cold boot. In the current
+     * stable build ~31 KiB is expected and must not by itself block a
+     * 720<->1080 switch. Actual V4L2/H.264 allocations decide start success.
      */
-    /* 1080p HW H.264 has a real internal-SRAM contiguous requirement.  The
-     * prior 32/88 KB restart guard only hid the problem until STREAMON, where
-     * esp_h264 reported "No memory for reference frame" at largest=94 KB.
-     * Keep 144 KB as the 1080p requirement.  720p60 uses a smaller HW working
-     * set and may legitimately start from the lower restart floor. */
+    /* live_dma_floor below is retained as a historical cold-path safety value.
+     * When the reference staging/fail-safe path is available, effective_floor
+     * is intentionally reduced and the real allocator remains authoritative. */
     const size_t live_dma_floor = (profile->width >= 1920U)
                                 ? CAM_LIVE_DMA_PREFERRED_LARGEST
                                 : (s_state.video_inited
                                    ? CAM_CSI_MIN_DMA_LARGEST
                                    : CAM_LIVE_MIN_DMA_LARGEST);
 
-    /* [REF-POOL] If the persistent reference pool is ready, 1080p no longer
-     * needs a new ~138KB param->ref allocation from the residual heap.
-     * Therefore bypass the old 147456-byte H.264 contiguous guard and retain
-     * only the generic CSI safety floor. If reserve failed, keep the original
-     * conservative guard for the stock malloc path. */
+    /* Current stable reference policy:
+     * INTERNAL persistent ref is normal; PSRAM ref remains staging/fail-safe
+     * and part of the proven allocation layout. With that path available the
+     * old large front guard is not enforced. 20 KiB remains warning-only DMA
+     * health telemetry. */
     const bool ref_pool_ready = esp_h264_enc_hw_ref_pool_ready();
-    const bool ref_pool_external = true; /* [REF-PSRAM-GUARD AB2-LAZY] */
+    const bool ref_pool_external = true; /* lazy PSRAM staging pool is supported */
+    const bool ref_fallback_ready = ref_pool_ready || ref_pool_external;
+    const size_t fallback_warn_floor = (20U * 1024U);
     size_t effective_floor = live_dma_floor;
-    if (ref_pool_ready || ref_pool_external) {
-        effective_floor = (24U * 1024U);
-        ESP_LOGW(TAG,
-                 "[SWITCH-DMA-GUARD-REFPOOL] pool ready; %s guard %u -> %u",
-                 profile->name, (unsigned)live_dma_floor, (unsigned)effective_floor);
+    if (ref_fallback_ready) {
+        effective_floor = 0U;
+        CAM_DETAIL_DIAG("[SWITCH-DMA-GUARD-REFPOOL] fallback ready; %s guard %u -> %u warn_floor=%u",
+                 profile->name, (unsigned)live_dma_floor, (unsigned)effective_floor,
+                 (unsigned)fallback_warn_floor);
     }
 
     const size_t dma_d4_free = dma_free();
     const size_t dma_d4_largest = dma_largest();
-    ESP_LOGW(TAG,
-             "[DMA-DIAG D4 before_guard] free=%u largest=%u guard_snapshot=%u required=%u",
+    CAM_DMA_DIAG(
+             "[DMA-DIAG D4 before_guard] free=%u largest=%u guard_snapshot=%u required=%u warn_floor=%u",
              (unsigned)dma_d4_free, (unsigned)dma_d4_largest,
-             (unsigned)largest0, (unsigned)effective_floor);
-    ESP_LOGW(TAG,
-             "[SWITCH-DMA-GUARD-V3] video_inited=%d largest=%u required=%u base=%u pool=%d profile=%s",
+             (unsigned)largest0, (unsigned)effective_floor,
+             ref_fallback_ready ? (unsigned)fallback_warn_floor : 0U);
+    if (ref_fallback_ready && largest0 < fallback_warn_floor) {
+        ESP_LOGW(TAG,
+                 "[SWITCH-DMA-GUARD-FALLBACK] largest=%u < warn_floor=%u; continue to H264 INTERNAL-PERSIST/PSRAM decision",
+                 (unsigned)largest0, (unsigned)fallback_warn_floor);
+    }
+    CAM_DETAIL_DIAG("[SWITCH-DMA-GUARD-V3] video_inited=%d largest=%u required=%u base=%u pool=%d fallback=%d profile=%s",
              s_state.video_inited ? 1 : 0,
              (unsigned)largest0, (unsigned)effective_floor,
-             (unsigned)live_dma_floor, ref_pool_ready ? 1 : 0, profile->name);
+             (unsigned)live_dma_floor, ref_pool_ready ? 1 : 0,
+             ref_fallback_ready ? 1 : 0, profile->name);
 
     if (largest0 < effective_floor) {
-        /* Fallback only. With a healthy ref pool this path should normally not
-         * run for 720p->1080p because the effective floor is only the generic
-         * CSI safety floor. If residual DMA is even lower, try esp_video_deinit
-         * once and re-sample before failing safely. */
+        /* Historical recovery branch below is deliberately disabled by
+         * `if (0 && ...)` so esp_video/ISP stays resident. Do not re-enable it
+         * as a cleanup shortcut; stable switching relies on resident ISP. */
         if (0 && s_state.video_inited) { /* [ISP-LIFECYCLE-A/B-NO-DEINIT] keep esp_video resident */
             ESP_LOGW(TAG,
                      "[SWITCH-DMA-DEFRAG] largest=%u < required=%u for %s; fallback esp_video_deinit",
@@ -3198,21 +4726,16 @@ static void camera_h264_live_task(void *arg)
         goto live_fail;
     }
 
-    /* [ISP-LIFECYCLE-C12A 2026-08-27]
-     * PROFILE SPLIT, based on the hardware A/B results:
+    /* [ISP-RESIDENT-1080-R12F4-20260919]
+     * Keep the ISP controller resident for BOTH profiles.  The former path
+     * deinitialized/reinitialized the whole controller on every returning
+     * 1080 start.  Flight-recorder run 30 held 27KB through many switches,
+     * then permanently stepped 27KB -> 25KB after a later profile cycle,
+     * matching allocator fragmentation rather than a per-session leak.
      *
-     *   1080p: keep the C10A EARLY full-controller restart.  It is known to
-     *          restore/retain correct 1080p colour and is done before the app
-     *          opens /dev/video0, so it stays on the safe side of C9A.
-     *
-     *   720p60: DO NOT restart the controller here.  Earlier C2F-T hardware
-     *           runs produced normal 720p while the long-lived controller was
-     *           preserved and its four software feedback/dedup fields were
-     *           rebased AFTER S_FMT, immediately before STREAMON.
-     *
-     * This is intentionally asymmetric.  C10A repeatedly reproduced the 720p
-     * purple/~4.2KB-IDR state, so applying the same lifecycle to both profiles
-     * is no longer a useful experiment. */
+     * First ever init still happens in init_video_once().  After that, no
+     * profile switch below tears down the controller.  Geometry/four-field
+     * state is refreshed only after the app S_FMT, immediately pre-STREAMON. */
     const bool c12a_controller_already_existed = s_state.video_inited;
     const bool c12a_is_1080 = (profile->width >= 1920U);
     if (init_video_once() != ESP_OK) {
@@ -3223,31 +4746,19 @@ static void camera_h264_live_task(void *arg)
     cam_dma_trace_mark("after_esp_video_init");
 
     if (c12a_is_1080) {
-        /* [CAM-FIRST-START-FULL-INIT-AB1-20260907]
-         * Make the first 1080p Start use the same safe EARLY full-controller
-         * restart that later 1080p Starts already use.  720p policy is unchanged. */
-        ESP_LOGW(TAG,
-                 "[CAM-FIRST-START-FULL-INIT-AB1] profile=%s controller_preexisted=%d -> full restart",
-                 profile->name, c12a_controller_already_existed ? 1 : 0);
-        ESP_LOGW(TAG,
-                 "[ISP-LIFECYCLE-C12A] profile=%s path=1080: EARLY full controller restart before app camera open",
-                 profile->name);
-        esp_err_t c10a_ret = esp_video_isp_pipeline_full_restart_for_ab();
-        ESP_LOGW(TAG,
-                 "[ISP-LIFECYCLE-C12A] 1080 EARLY full controller restart ret=%s (0x%x)",
-                 esp_err_to_name(c10a_ret), (unsigned)c10a_ret);
-        if (c10a_ret != ESP_OK) {
-            saved_errno = EIO;
-            fail_stage = "live_isp_c12a_1080_full_restart";
-            goto live_fail;
+        if (!c12a_controller_already_existed) {
+            CAM_DETAIL_DIAG("[ISP-RESIDENT-1080-R12F4] profile=%s first controller init already bound; no redundant restart dma=%u/%u",
+                     profile->name, (unsigned)dma_free(), (unsigned)dma_largest());
+        } else {
+            CAM_DETAIL_DIAG("[ISP-RESIDENT-1080-R12F4] profile=%s controller_preexisted=1 -> KEEP controller; defer geometry/four-field resync to post-S_FMT dma=%u/%u",
+                     profile->name, (unsigned)dma_free(), (unsigned)dma_largest());
         }
     } else {
-        ESP_LOGW(TAG,
-                 "[ISP-LIFECYCLE-C12A] profile=%s path=720: KEEP controller; defer four-field resync until post-S_FMT",
+        CAM_DETAIL_DIAG("[ISP-RESIDENT-1080-R12F4] profile=%s path=720: KEEP controller; defer geometry/four-field resync until post-S_FMT",
                  profile->name);
     }
 
-    ESP_LOGW(TAG, "[DMA-DIAG D10 after_isp_lifecycle_stage] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D10 after_isp_lifecycle_stage] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
 
     cam_fd = open(CAM_CSI_DEVICE, O_RDWR);
@@ -3376,20 +4887,40 @@ static void camera_h264_live_task(void *arg)
     struct v4l2_requestbuffers cam_req = {
         .count = CAM_CSI_BUFFER_COUNT,
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-        .memory = V4L2_MEMORY_MMAP,
+        .memory = cam_memory,
     };
+
+    /* Arena mode does not release/reacquire camera-frame PSRAM. If bootstrap
+     * arena reservation failed, retain the existing 1080 BRIDGE-R1 fallback. */
+    if (!cam_userptr_active && profile_id == CAMERA_H264_PROFILE_1080P) {
+        cam_psram_1080_bridge_release("pre-1080-camera-REQBUFS");
+    }
+    cam_psram_frag_diag_log("pre-live-camera-REQBUFS", profile->name, width, height);
+    if (cam_userptr_active) {
+        ESP_LOGW(TAG,
+                 "[CAM-USERPTR-ARENA-R1] REQBUFS profile=%s mem=USERPTR "
+                 "arena=%p slot=%u count=%u PSRAM=%u/%u",
+                 profile->name, s_cam_userptr_arena,
+                 (unsigned)CAM_USERPTR_ARENA_SLOT_BYTES,
+                 (unsigned)CAM_CSI_BUFFER_COUNT,
+                 (unsigned)psram_free(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    }
     if (ioctl(cam_fd, VIDIOC_REQBUFS, &cam_req) != 0 || cam_req.count < 2) {
         saved_errno = errno ? errno : ENOMEM;
+        cam_psram_frag_diag_log("post-live-camera-REQBUFS-FAIL", profile->name, width, height);
         fail_stage = "live_camera_REQBUFS";
         goto live_fail;
     }
     if (cam_req.count > CAM_CSI_BUFFER_COUNT) cam_req.count = CAM_CSI_BUFFER_COUNT;
-    ESP_LOGI(TAG, "LIVE camera buffers requested=%u actual=%u",
-             (unsigned)CAM_CSI_BUFFER_COUNT, (unsigned)cam_req.count);
+    CAM_DETAIL_INFO("LIVE camera buffers requested=%u actual=%u memory=%s",
+             (unsigned)CAM_CSI_BUFFER_COUNT, (unsigned)cam_req.count,
+             cam_userptr_active ? "USERPTR" : "MMAP");
+
     for (uint32_t i = 0; i < cam_req.count; ++i) {
         struct v4l2_buffer b = {
             .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = cam_memory,
             .index = i,
         };
         if (ioctl(cam_fd, VIDIOC_QUERYBUF, &b) != 0) {
@@ -3397,15 +4928,42 @@ static void camera_h264_live_task(void *arg)
             fail_stage = "live_camera_QUERYBUF";
             goto live_fail;
         }
-        cam_maps[i].length = b.length;
-        cam_maps[i].start = mmap(NULL, b.length, PROT_READ | PROT_WRITE,
-                                 MAP_SHARED, cam_fd, b.m.offset);
-        if (!cam_maps[i].start || cam_maps[i].start == MAP_FAILED) {
-            cam_maps[i].start = NULL;
-            saved_errno = errno ? errno : ENOMEM;
-            fail_stage = "live_camera_mmap";
-            goto live_fail;
+
+        if (cam_userptr_active) {
+            /* QUERYBUF length is the driver's required aligned payload size.
+             * The permanent 1080-sized slot must cover both 1080 and 720. */
+            if (b.length > CAM_USERPTR_ARENA_SLOT_BYTES ||
+                !cam_userptr_prepare_qbuf(&b)) {
+                ESP_LOGE(TAG,
+                         "[CAM-USERPTR-ARENA-R1] slot rejected index=%u "
+                         "driver_need=%u slot=%u ptr=%p",
+                         (unsigned)i, (unsigned)b.length,
+                         (unsigned)CAM_USERPTR_ARENA_SLOT_BYTES,
+                         cam_userptr_arena_slot(i));
+                saved_errno = EMSGSIZE;
+                fail_stage = "live_camera_USERPTR_slot_capacity";
+                goto live_fail;
+            }
+            cam_maps[i].start = cam_userptr_arena_slot(i);
+            cam_maps[i].length = CAM_USERPTR_ARENA_SLOT_BYTES;
+            ESP_LOGW(TAG,
+                     "[CAM-USERPTR-ARENA-R1] SLOT index=%u ptr=%p "
+                     "driver_need=%u qbuf_len=%u",
+                     (unsigned)i, cam_maps[i].start,
+                     (unsigned)b.length,
+                     (unsigned)CAM_USERPTR_ARENA_SLOT_BYTES);
+        } else {
+            cam_maps[i].length = b.length;
+            cam_maps[i].start = mmap(NULL, b.length, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED, cam_fd, b.m.offset);
+            if (!cam_maps[i].start || cam_maps[i].start == MAP_FAILED) {
+                cam_maps[i].start = NULL;
+                saved_errno = errno ? errno : ENOMEM;
+                fail_stage = "live_camera_mmap";
+                goto live_fail;
+            }
         }
+
         cam_mapped_count++;
         if (ioctl(cam_fd, VIDIOC_QBUF, &b) != 0) {
             saved_errno = errno;
@@ -3414,7 +4972,7 @@ static void camera_h264_live_task(void *arg)
         }
     }
     cam_dma_trace_mark("after_camera_buffers");
-    ESP_LOGW(TAG, "[DMA-DIAG D11 after_camera_buffers_ready] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D11 after_camera_buffers_ready] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
 
     enc_fd = open("/dev/video11", O_RDWR);
@@ -3437,7 +4995,7 @@ static void camera_h264_live_task(void *arg)
 
     /* The esp_video H.264 codec object is created when the encoder CAPTURE
      * queue is STREAMON, so the production I_PERIOD/QP controls must be set
-     * before that point.  1080p starts at GOP5; 720p production starts at GOP8.
+     * before that point.  1080p GOOD uses GOP5, LTE uses GOP15; 720p production starts at GOP8.
      * 1080 live-GOP changes after open use the dedicated no-restart HW path. */
     if (h264_set_ctrl_required(enc_fd, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
                                profile->gop, "i_period_precreate") != ESP_OK ||
@@ -3484,8 +5042,7 @@ static void camera_h264_live_task(void *arg)
         goto live_fail;
     }
     const uint32_t enc_input_required = enc_out_query.length;
-    ESP_LOGI(TAG,
-             "LIVE encoder input buffer need=%u bytes (S_FMT sizeimage=%u) for %ux%u YU12",
+    CAM_DETAIL_INFO("LIVE encoder input buffer need=%u bytes (S_FMT sizeimage=%u) for %ux%u YU12",
              (unsigned)enc_input_required, (unsigned)enc_in_fmt.fmt.pix.sizeimage,
              (unsigned)width, (unsigned)height);
 
@@ -3498,6 +5055,10 @@ static void camera_h264_live_task(void *arg)
         saved_errno = errno;
         fail_stage = "live_encoder_S_FMT_CAPTURE";
         goto live_fail;
+    }
+    if (cam_userptr_active) {
+        cam_psram_frag_diag_log("pre-live-encoder-REQBUFS-CAPTURE",
+                                profile->name, width, height);
     }
     struct v4l2_requestbuffers enc_cap_req = {
         .count = 1,
@@ -3534,7 +5095,7 @@ static void camera_h264_live_task(void *arg)
         goto live_fail;
     }
     cam_dma_trace_mark("before_encoder_cap_streamon");
-    ESP_LOGW(TAG, "[DMA-DIAG D12 before_encoder_cap_streamon] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D12 before_encoder_cap_streamon] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
 
     int enc_cap_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -3545,7 +5106,7 @@ static void camera_h264_live_task(void *arg)
     }
     enc_cap_streaming = true;
     cam_dma_trace_mark("after_encoder_cap_streamon");
-    ESP_LOGW(TAG, "[DMA-DIAG D13 after_encoder_cap_streamon_refpool] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D13 after_encoder_cap_streamon_refpool] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
 
     /* Do NOT rewrite I_PERIOD here; the codec was just created with the
@@ -3589,11 +5150,30 @@ static void camera_h264_live_task(void *arg)
             goto live_fail;
         }
     } else {
-        /* [ISP-LIFECYCLE-C12C-1080 2026-08-27]
-         * Incremental A/B over C12B: for 1080 only, recreate/reinitialize the
-         * IPA at the proven post-S_FMT/pre-STREAMON point and apply its initial
-         * metadata.  Do NOT add geometry refresh, sensor writes, metadata-fd
-         * restart/reopen, or another controller lifecycle. */
+        /* [ISP-RESIDENT-1080-R12F4-20260919]
+         * Returning 1080 no longer receives a full controller restart.  Its
+         * long-lived controller cache can therefore still describe 720.
+         * Reuse the proven no-reopen C12E geometry + statistics-selection +
+         * four-field rebase after S_FMT, then keep the existing C12C 1080
+         * fresh-IPA-only step below.  The C12E helper recreates IPA only for a
+         * real 1080->720 transition, so on 720->1080 this first call is purely
+         * geometry/four-field resync and cannot double-recreate the IPA. */
+        if (c12a_controller_already_existed) {
+            CAM_DETAIL_DIAG("[ISP-RESIDENT-1080-R12F4] 1080 post-S_FMT resident geometry/four-field resync begin dma=%u/%u",
+                     (unsigned)dma_free(), (unsigned)dma_largest());
+            esp_err_t resident_1080_ret = esp_video_isp_pipeline_720_resync_for_c12a();
+            CAM_DETAIL_DIAG("[ISP-RESIDENT-1080-R12F4] 1080 resident geometry/four-field ret=%s (0x%x) dma=%u/%u",
+                     esp_err_to_name(resident_1080_ret), (unsigned)resident_1080_ret,
+                     (unsigned)dma_free(), (unsigned)dma_largest());
+            if (resident_1080_ret != ESP_OK) {
+                saved_errno = EIO;
+                fail_stage = "live_isp_resident_1080_geometry_resync";
+                goto live_fail;
+            }
+        }
+
+        /* Keep the proven post-S_FMT/pre-STREAMON 1080 IPA refresh.
+         * Controller, metadata fd/task/mutex and camera fd remain resident. */
         ESP_LOGW(TAG,
                  "[ISP-LIFECYCLE-C12C-1080] 1080 post-S_FMT/pre-STREAMON fresh-IPA-only begin");
         esp_err_t c12c_1080_ret = esp_video_isp_pipeline_fresh_ipa_for_c12c_1080();
@@ -3607,9 +5187,11 @@ static void camera_h264_live_task(void *arg)
         }
     }
 
-    ESP_LOGW(TAG, "[DMA-DIAG D14 after_fresh_ipa] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D14 after_fresh_ipa] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
 
+    const size_t r9_s0_free = dma_free();
+    const size_t r9_s0_largest = dma_largest();
     int cam_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(cam_fd, VIDIOC_STREAMON, &cam_type) != 0) {
         saved_errno = errno;
@@ -3618,20 +5200,38 @@ static void camera_h264_live_task(void *arg)
     }
     cam_streaming = true;
     cam_dma_trace_mark("after_camera_streamon");
-    ESP_LOGW(TAG, "[DMA-DIAG D15 after_camera_streamon] free=%u largest=%u",
-             (unsigned)dma_free(), (unsigned)dma_largest());
+    const size_t r9_s1_free = dma_free();
+    const size_t r9_s1_largest = dma_largest();
+    CAM_DMA_DIAG("[DMA-DIAG D15 after_camera_streamon] free=%u largest=%u",
+             (unsigned)r9_s1_free, (unsigned)r9_s1_largest);
+    CAM_DETAIL_DIAG("[DMA-CAM-START-R9] STREAMON S0_before=%u/%u S1_after=%u/%u delta_free=%d delta_largest=%d",
+             (unsigned)r9_s0_free, (unsigned)r9_s0_largest,
+             (unsigned)r9_s1_free, (unsigned)r9_s1_largest,
+             (int)r9_s1_free - (int)r9_s0_free,
+             (int)r9_s1_largest - (int)r9_s0_largest);
 
     ESP_LOGI(TAG, "LIVE pipeline STREAMON OK %ux%u YU12->H264; warmup=2",
              (unsigned)width, (unsigned)height);
+#if LCD_DSI_PROBE_R7
+    lcd_dsiprobe_r7_snapshot(&r7_probe, "START");
+#endif
+#if LCD_DSI_FRAMEBB_R7B
+    lcd_dsi_r7b_mark("START");               /* frame seq at STREAMON */
+#endif
 
     for (int w = 0; w < 2 && !live_stop_requested(); ++w) {
         struct v4l2_buffer warm = {
             .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = cam_memory,
         };
         if (ioctl(cam_fd, VIDIOC_DQBUF, &warm) != 0) {
             saved_errno = errno;
             fail_stage = "live_camera_DQBUF_warmup";
+            goto live_fail;
+        }
+        if (cam_userptr_active && !cam_userptr_prepare_qbuf(&warm)) {
+            saved_errno = EFAULT;
+            fail_stage = "live_camera_USERPTR_warmup_requeue";
             goto live_fail;
         }
         if (ioctl(cam_fd, VIDIOC_QBUF, &warm) != 0) {
@@ -3661,7 +5261,7 @@ static void camera_h264_live_task(void *arg)
         int64_t dq_start_us = loop_start_us;
         struct v4l2_buffer cb = {
             .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = cam_memory,
         };
         if (ioctl(cam_fd, VIDIOC_DQBUF, &cb) != 0) {
             if (live_stop_requested()) break;
@@ -3700,7 +5300,7 @@ static void camera_h264_live_task(void *arg)
             goto live_fail;
         }
         if (camera_frames <= 3) {
-            ESP_LOGI(TAG,
+            CAM_DETAIL_INFO(
                      "LIVE zero-copy input frame=%u cb_bytesused=%u cam_map=%u enc_user_len=%u",
                      (unsigned)camera_frames, (unsigned)cb.bytesused,
                      (unsigned)cam_maps[cb.index].length, (unsigned)enc_user_len);
@@ -3780,10 +5380,26 @@ static void camera_h264_live_task(void *arg)
             goto live_fail;
         }
 
+        /* [FACE-AI-TAP-R1B-20260928]
+         * H264 has returned the raw USERPTR, so the encoder no longer owns
+         * this CSI frame. Sample it read-only before the existing early QBUF.
+         * No V4L2 ownership, camera reopen, REQBUFS or H264/WebRTC control is
+         * changed by this call. */
+        face_ai_tap_offer_ouyy((const uint8_t *)cam_maps[cb.index].start,
+                               cb.bytesused, width, height);
+
         /* The encoder has returned its USERPTR OUTPUT buffer, so it no longer
          * owns the camera frame. Requeue the CSI buffer immediately, before
          * parsing/sending the encoded bitstream, so the camera/ISP can capture
-         * the next frame in parallel with WebRTC/SRTP work. */
+         * the next frame in parallel with WebRTC/SRTP work.
+         *
+         * esp_video DQBUF(USERPTR) does not restore m.userptr, so rebuild the
+         * index->fixed-arena-slot mapping before every camera QBUF. */
+        if (cam_userptr_active && !cam_userptr_prepare_qbuf(&cb)) {
+            saved_errno = EFAULT;
+            fail_stage = "live_camera_USERPTR_early_requeue";
+            goto live_fail;
+        }
         if (ioctl(cam_fd, VIDIOC_QBUF, &cb) != 0) {
             saved_errno = errno;
             fail_stage = "live_camera_QBUF_early_requeue";
@@ -3801,6 +5417,7 @@ static void camera_h264_live_task(void *arg)
             if (!first_encoded_us) first_encoded_us = now_us;
             last_encoded_us = now_us;
             if (used > h264_bytes_max) h264_bytes_max = used;
+            h264_window_bytes += (uint64_t)used;
             if (enc_us > enc_us_max) enc_us_max = enc_us;
 
             if (profile->gop == 1U && encoded_frames <= 4) {
@@ -3833,8 +5450,9 @@ static void camera_h264_live_task(void *arg)
                 ESP_LOGI(TAG, "LIVE first H264 bytes=%u NAL{sps=%u pps=%u idr=%u p=%u}",
                          (unsigned)used, (unsigned)first_nal.sps, (unsigned)first_nal.pps,
                          (unsigned)first_nal.idr, (unsigned)first_nal.non_idr);
-                ESP_LOGW(TAG, "[DMA-DIAG D16 after_first_h264_frame] free=%u largest=%u",
+                CAM_DMA_DIAG("[DMA-DIAG D16 after_first_h264_frame] free=%u largest=%u",
                          (unsigned)dma_free(), (unsigned)dma_largest());
+                cdot_r1_mark("first_h264_frame");    /* [CAM-DMA-OWNER-TRACE-R1] */
                 if (have_sps_profile) {
                     ESP_LOGI(TAG,
                              "LIVE SPS profile-level-id=%02x%02x%02x "
@@ -3894,6 +5512,13 @@ static void camera_h264_live_task(void *arg)
                 encode_fps_recent_x100 = (uint32_t)(
                     ((uint64_t)(encoded_frames - fps_window_encoded_base) * 100000000ULL) /
                     (uint64_t)fps_window_elapsed_us);
+                /* bytes * 8 bits / elapsed seconds / 1000 = kbps.
+                 * h264_window_bytes includes every valid encoded access unit,
+                 * before the WebRTC consumer callback. */
+                h264_tx_kbps_recent = (uint32_t)(
+                    (h264_window_bytes * 8000ULL + (uint64_t)fps_window_elapsed_us / 2ULL) /
+                    (uint64_t)fps_window_elapsed_us);
+                h264_window_bytes = 0;
                 fps_window_camera_base = camera_frames;
                 fps_window_encoded_base = encoded_frames;
                 fps_window_start_us = now_us;
@@ -3912,6 +5537,7 @@ static void camera_h264_live_task(void *arg)
             s_live.stats.encode_fps_x100 = encode_fps_publish_x100;
             s_live.stats.h264_bytes_last = used;
             s_live.stats.h264_bytes_max = h264_bytes_max;
+            s_live.stats.h264_tx_kbps = h264_tx_kbps_recent;
             s_live.stats.encode_us_last = enc_us;
             s_live.stats.encode_us_max = enc_us_max;
             s_live.stats.camera_dq_us_last = camera_dq_us;
@@ -3942,6 +5568,9 @@ static void camera_h264_live_task(void *arg)
         s_live.stats.loop_us_max = loop_us_max;
         taskEXIT_CRITICAL(&s_live_mux);
 
+#if LCD_DSI_PROBE_R7
+        lcd_dsiprobe_r7_sample(&r7_probe, loop_done_us); /* [LCD-DSI-BLACKBOX-R7A] silent live sample */
+#endif
         if (loop_done_us - last_log_us >= CAM_LIVE_LOG_INTERVAL_US) {
             size_t df = dma_free(), dl = dma_largest(), pf = psram_free();
             taskENTER_CRITICAL(&s_live_mux);
@@ -3985,49 +5614,99 @@ live_fail:
              saved_errno ? strerror(saved_errno) : "n/a");
 
 live_cleanup:
+#if LCD_DSI_FRAMEBB_R7B
+    lcd_dsi_r7b_disarm();                    /* [LCD-DSI-FRAMEBB-R7B] stop recording before teardown */
+#endif
     ESP_LOGW(TAG, "[DMA-DIAG D5 camera_cleanup_entry] free=%u largest=%u",
              (unsigned)dma_free(), (unsigned)dma_largest());
+    cdot_r1_mark("cleanup_entry");           /* [CAM-DMA-OWNER-TRACE-R1] */
     /* Freeze new trace entries, but keep tracking frees performed by cleanup. */
     cam_dma_trace_pause_for_720_cleanup(profile_id);
+    if (lcdpat_live_active || lcdpat_live_lvgl_timer_paused) {
+        esp_err_t lcdpat_restore = camera_diag_lcd_pattern_leave(
+            lcdpat_live_panel, &lcdpat_live_lvgl_timer_paused);
+        ESP_LOGW(TAG, "[LCDPAT-LIVE-AB-R3] LEAVE restore=%s", esp_err_to_name(lcdpat_restore));
+        lcdpat_live_active = false;
+        lcdpat_live_panel = NULL;
+    }
+    if (dsiqos_r5_active) {
+        /* [LCD-DSIQOS-LIVE-AB-R5] prove the value survived the session, then restore. */
+        const axi_qos_diag_t r5_pre = axi_qos_diag_read();
+        axi_icm_ll_set_dw_gdma_qos_arbiter_prio(1, dsiqos_r5_saved_w, dsiqos_r5_saved_r);
+        const axi_qos_diag_t r5_post = axi_qos_diag_read();
+        ESP_LOGW(TAG, "[LCD-DSIQOS-LIVE-AB-R5] LEAVE pre{r=%u,w=%u} -> restored{r=%u,w=%u} ar=0x%08" PRIx32 " aw=0x%08" PRIx32,
+                 (unsigned)r5_pre.gdma_m2_r, (unsigned)r5_pre.gdma_m2_w,
+                 (unsigned)r5_post.gdma_m2_r, (unsigned)r5_post.gdma_m2_w,
+                 r5_post.ar_raw, r5_post.aw_raw);
+        dsiqos_r5_active = false;
+    }
     if (lcd_stream_flag) {
         lcd_ui_set_camera_stream_active(false);
         lcd_stream_flag = false;
     }
+    cdot_r1_mark("cleanup_after_lcd_flag");  /* [CAM-DMA-OWNER-TRACE-R1] */
     if (cam_streaming && cam_fd >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
     }
+    cdot_r1_mark("cleanup_after_cam_streamoff");     /* [CAM-DMA-OWNER-TRACE-R1] */
     if (enc_out_streaming && enc_fd >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
         ioctl(enc_fd, VIDIOC_STREAMOFF, &type);
     }
+    cdot_r1_mark("cleanup_after_enc_out_streamoff"); /* [CAM-DMA-OWNER-TRACE-R1] */
     if (enc_cap_streaming && enc_fd >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(enc_fd, VIDIOC_STREAMOFF, &type);
     }
+    cdot_r1_mark("cleanup_after_enc_cap_streamoff"); /* [CAM-DMA-OWNER-TRACE-R1] */
     /* Unmap first, then explicitly release each V4L2 queue while its fd is
      * still open.  This is important for repeated 720p60 <-> 1080p switching. */
     if (enc_map) {
         munmap(enc_map, enc_map_len);
         enc_map = NULL;
     }
-    for (uint32_t i = 0; i < cam_mapped_count; ++i) {
-        if (cam_maps[i].start) {
-            munmap(cam_maps[i].start, cam_maps[i].length);
+    if (!cam_userptr_active) {
+        for (uint32_t i = 0; i < cam_mapped_count; ++i) {
+            if (cam_maps[i].start) {
+                munmap(cam_maps[i].start, cam_maps[i].length);
+                cam_maps[i].start = NULL;
+            }
+        }
+    } else {
+        /* Permanent arena ownership is process-wide, not per V4L2 generation. */
+        for (uint32_t i = 0; i < cam_mapped_count; ++i) {
             cam_maps[i].start = NULL;
+            cam_maps[i].length = 0;
         }
     }
 
+    cdot_r1_mark("cleanup_after_munmap");    /* [CAM-DMA-OWNER-TRACE-R1] */
     size_t rel_df0 = dma_free(), rel_dl0 = dma_largest(), rel_pf0 = psram_free();
     ESP_LOGI(TAG, "[REQBUFS-RELEASE] before dma=%u/%u psram=%u",
              (unsigned)rel_df0, (unsigned)rel_dl0, (unsigned)rel_pf0);
+
+    const bool owner_retry_candidate =
+        allow_owner_retry && !live_stop_requested() && saved_errno == EPERM &&
+        fail_stage && strcmp(fail_stage, "live_camera_DQBUF_warmup") == 0;
 
     live_reqbufs_release_best_effort(enc_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT,
                                      V4L2_MEMORY_USERPTR, "h264-output");
     live_reqbufs_release_best_effort(enc_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
                                      V4L2_MEMORY_MMAP, "h264-capture");
-    live_reqbufs_release_best_effort(cam_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-                                     V4L2_MEMORY_MMAP, "camera-capture");
+
+    /* [CAM-OWNER-RETRY-R1-20261004]
+     * EPERM/"Not owner" means this camera generation no longer owns the
+     * capture queue. Do not issue REQBUFS(0) against that stale ownership:
+     * unmap/STREAMOFF/close the fd and let a fresh open own the next queue.
+     * All other cleanup paths retain the proven explicit REQBUFS(0). */
+    if (owner_retry_candidate) {
+        ESP_LOGW(TAG,
+                 "[CAM-OWNER-RETRY-R1] stale owner at warmup; skip camera REQBUFS(0) and fresh-reopen once");
+    } else {
+        live_reqbufs_release_best_effort(cam_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                                         cam_memory, "camera-capture");
+    }
 
     /* Allow any driver-side deferred queue cleanup to complete before the fd
      * close and before we sample the heap for the next profile. */
@@ -4037,8 +5716,37 @@ live_cleanup:
     ESP_LOGI(TAG, "[REQBUFS-RELEASE] after  dma=%u/%u psram=%u delta_largest=%d",
              (unsigned)rel_df1, (unsigned)rel_dl1, (unsigned)rel_pf1,
              (int)rel_dl1 - (int)rel_dl0);
-    ESP_LOGW(TAG, "[DMA-DIAG D6 after_reqbufs_release] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D6 after_reqbufs_release] free=%u largest=%u",
              (unsigned)rel_df1, (unsigned)rel_dl1);
+    cdot_r1_mark("cleanup_after_reqbufs0");  /* [CAM-DMA-OWNER-TRACE-R1] */
+
+    /* [CAM-1080-PSRAM-BRIDGE-R1]
+     * Reacquire only ONE bridge after a 1080 generation returns all queues.
+     * Unlike GUARD-R1, this cannot consume ~9.63 MB and choke the next 720.
+     * Fail-open if the current topology cannot supply the bridge. */
+    if (!cam_userptr_active && profile_id == CAMERA_H264_PROFILE_1080P) {
+        (void)cam_psram_1080_bridge_acquire("post-1080-REQBUFS-release");
+    }
+
+    /* [FACE-AI-R2D-20260928]
+     * R2C kept the detector, RGB frame, worker stack and YUV staging alive
+     * across camera sessions.  That changed PSRAM allocation order and the
+     * next 1080 camera VIDIOC_REQBUFS could fail ENOMEM even with ~17 MB total
+     * PSRAM free.  Camera buffers are already STREAMOFF/unmapped/REQBUFS(0)
+     * here, so release FACE-AI now, on this camera worker's INTERNAL stack,
+     * before the next profile is allowed to allocate capture buffers. */
+    {
+        size_t ai_pf0 = psram_free();
+        size_t ai_pl0 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+        bool ai_stop_ok = face_ai_tap_shutdown(750);
+        size_t ai_pf1 = psram_free();
+        size_t ai_pl1 = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+        ESP_LOGW(TAG,
+                 "[FACE-AI-R2D] camera-cleanup release ok=%u PSRAM=%u/%u->%u/%u",
+                 ai_stop_ok ? 1U : 0U,
+                 (unsigned)ai_pf0, (unsigned)ai_pl0,
+                 (unsigned)ai_pf1, (unsigned)ai_pl1);
+    }
 
     if (enc_fd >= 0) close(enc_fd);
     if (cam_fd >= 0) {
@@ -4055,6 +5763,16 @@ live_cleanup:
     /* One scheduler turn after close makes the post-cleanup measurement more
      * representative for a subsequent Start request. */
     vTaskDelay(pdMS_TO_TICKS(10));
+    cdot_r1_end("cleanup_after_close");      /* [CAM-DMA-OWNER-TRACE-R1] */
+
+#if LCD_DSI_PROBE_R7
+    /* [LCD-DSIPROBE-R7] AFTER STOP: camera closed, LCD back to production path. */
+    lcd_dsiprobe_r7_snapshot(&r7_probe, "STOP");
+    lcd_dsiprobe_r7_finish(&r7_probe);
+#endif
+#if LCD_DSI_FRAMEBB_R7B
+    lcd_dsi_r7b_dump();                      /* [LCD-DSI-FRAMEBB-R7B] after camera closed */
+#endif
 
     /* [ISP-LIFECYCLE-C2F-T-20260826]
      * Timing-only A/B: the B+C gain-state resync was MOVED from here (Stop)
@@ -4063,12 +5781,31 @@ live_cleanup:
     cam_dma_trace_dump_after_720_cleanup();
 
     size_t df = dma_free(), dl = dma_largest(), pf = psram_free();
-    ESP_LOGW(TAG, "[DMA-DIAG D7 after_camera_cleanup] free=%u largest=%u",
+    CAM_DMA_DIAG("[DMA-DIAG D7 after_camera_cleanup] free=%u largest=%u",
              (unsigned)df, (unsigned)dl);
     ESP_LOGI(TAG, "LIVE cleanup stage=%s frames=%u sent=%u drop=%u dma=%u/%u psram=%u",
              fail_stage ? fail_stage : "unknown", (unsigned)encoded_frames,
              (unsigned)delivered_frames, (unsigned)consumer_drops,
              (unsigned)df, (unsigned)dl, (unsigned)pf);
+
+    if (owner_retry_candidate) {
+        taskENTER_CRITICAL(&s_live_mux);
+        s_live.stats.running = true;
+        s_live.stats.dma_free = (uint32_t)df;
+        s_live.stats.dma_largest = (uint32_t)dl;
+        s_live.stats.psram_free = (uint32_t)pf;
+        s_live.stats.last_errno = saved_errno;
+        snprintf(s_live.stats.last_stage, sizeof(s_live.stats.last_stage),
+                 "owner_retry_warmup");
+        s_live.running = true;
+        taskEXIT_CRITICAL(&s_live_mux);
+
+        ESP_LOGW(TAG,
+                 "[CAM-OWNER-RETRY-R1] RETRY armed profile=%s after warmup EPERM; WebRTC session kept",
+                 profile->name);
+        vTaskDelay(pdMS_TO_TICKS(40));
+        return true;
+    }
 
     taskENTER_CRITICAL(&s_live_mux);
     s_live.stats.running = false;
@@ -4079,11 +5816,45 @@ live_cleanup:
     snprintf(s_live.stats.last_stage, sizeof(s_live.stats.last_stage), "%s",
              fail_stage ? fail_stage : "unknown");
     s_live.running = false;
-    s_live.task = NULL;
+    /* R22: keep s_live.task bound to the permanent static worker. */
     taskEXIT_CRITICAL(&s_live_mux);
 
+    const UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
+    CAM_DMA_DIAG(
+             "[DMA-DIAG D17 cam_task_stack_hwm] configured=%u high_watermark=%u free=%u largest=%u",
+             (unsigned)CAM_LIVE_TASK_STACK,
+             (unsigned)stack_hwm,
+             (unsigned)dma_free(),
+             (unsigned)dma_largest());
+
     if (s_live.done) xSemaphoreGive(s_live.done);
-    vTaskDelete(NULL);
+    return false;
+}
+
+/* [CAM-LIVE-PERSISTENT-WORKER-R22-20260920]
+ * One static TCB + one static stack live for the process lifetime. A Start
+ * request posts a task notification; after run_once() finishes, the worker
+ * returns here and waits for the next generation instead of self-deleting. */
+static void camera_h264_live_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG,
+             "[CAM-LIVE-PERSISTENT-WORKER-R22] worker started stack=%u core=%d",
+             (unsigned)CAM_LIVE_TASK_STACK, xPortGetCoreID());
+
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        /* [CAM-OWNER-RETRY-R1-20261004]
+         * One and only one internal retry for warmup DQBUF EPERM. The first
+         * run returns true only after full local cleanup/close while keeping
+         * s_live.running asserted, so web/ICE/DTLS are not torn down. */
+        bool owner_retry = camera_h264_live_run_once(true);
+        if (owner_retry && !live_stop_requested()) {
+            ESP_LOGW(TAG, "[CAM-OWNER-RETRY-R1] fresh generation retry begin");
+            (void)camera_h264_live_run_once(false);
+        }
+    }
 }
 
 static esp_err_t camera_dma_prewarm_h264_tiny(int *out_errno,
@@ -4807,21 +6578,67 @@ esp_err_t camera_h264_stream_start(camera_h264_frame_cb_t cb, void *ctx)
     snprintf(s_live.stats.last_stage, sizeof(s_live.stats.last_stage), "task_create");
     taskEXIT_CRITICAL(&s_live_mux);
 
+    const size_t task_dma_free_before = dma_free();
+    const size_t task_dma_largest_before = dma_largest();
+    CAM_DMA_DIAG(
+             "[DMA-DIAG D2 before_cam_task_create] stack=%u free=%u largest=%u",
+             (unsigned)CAM_LIVE_TASK_STACK,
+             (unsigned)task_dma_free_before,
+             (unsigned)task_dma_largest_before);
+
     TaskHandle_t th = NULL;
-    if (xTaskCreatePinnedToCore(camera_h264_live_task, "cam_h264_live",
-                                CAM_LIVE_TASK_STACK, NULL, CAM_LIVE_TASK_PRIO,
-                                &th, CAM_LIVE_TASK_CORE) != pdPASS) {
-        taskENTER_CRITICAL(&s_live_mux);
-        s_live.running = false;
-        s_live.stats.running = false;
-        s_live.stats.last_errno = ENOMEM;
-        snprintf(s_live.stats.last_stage, sizeof(s_live.stats.last_stage), "task_create_failed");
-        taskEXIT_CRITICAL(&s_live_mux);
-        return ESP_ERR_NO_MEM;
-    }
+    bool worker_created = false;
     taskENTER_CRITICAL(&s_live_mux);
-    s_live.task = th;
+    th = s_live.task;
     taskEXIT_CRITICAL(&s_live_mux);
+
+    if (th == NULL) {
+        th = xTaskCreateStaticPinnedToCore(camera_h264_live_task, "cam_h264_live",
+                                           CAM_LIVE_TASK_STACK, NULL,
+                                           CAM_LIVE_TASK_PRIO,
+                                           s_cam_live_task_stack,
+                                           &s_cam_live_task_tcb,
+                                           CAM_LIVE_TASK_CORE);
+        if (th == NULL) {
+            const size_t task_dma_free_fail = dma_free();
+            const size_t task_dma_largest_fail = dma_largest();
+            ESP_LOGE(TAG,
+                     "[DMA-DIAG D2 task_create_failed] stack=%u free=%u largest=%u -> free=%u largest=%u",
+                     (unsigned)CAM_LIVE_TASK_STACK,
+                     (unsigned)task_dma_free_before,
+                     (unsigned)task_dma_largest_before,
+                     (unsigned)task_dma_free_fail,
+                     (unsigned)task_dma_largest_fail);
+            taskENTER_CRITICAL(&s_live_mux);
+            s_live.running = false;
+            s_live.stats.running = false;
+            s_live.stats.last_errno = ENOMEM;
+            snprintf(s_live.stats.last_stage, sizeof(s_live.stats.last_stage), "task_create_failed");
+            taskEXIT_CRITICAL(&s_live_mux);
+            return ESP_ERR_NO_MEM;
+        }
+        taskENTER_CRITICAL(&s_live_mux);
+        s_live.task = th;
+        taskEXIT_CRITICAL(&s_live_mux);
+        worker_created = true;
+    }
+
+    const size_t task_dma_free_after = dma_free();
+    const size_t task_dma_largest_after = dma_largest();
+    CAM_DMA_DIAG(
+             "[DMA-DIAG D2 after_cam_task_%s] stack=%u free=%u largest=%u -> free=%u largest=%u delta_free=%d delta_largest=%d",
+             worker_created ? "create" : "reuse",
+             (unsigned)CAM_LIVE_TASK_STACK,
+             (unsigned)task_dma_free_before,
+             (unsigned)task_dma_largest_before,
+             (unsigned)task_dma_free_after,
+             (unsigned)task_dma_largest_after,
+             (int)task_dma_free_after - (int)task_dma_free_before,
+             (int)task_dma_largest_after - (int)task_dma_largest_before);
+    ESP_LOGW(TAG,
+             "[CAM-LIVE-PERSISTENT-WORKER-R22] %s worker=%p -> notify generation",
+             worker_created ? "CREATE-ONCE" : "REUSE", (void *)th);
+    xTaskNotifyGive(th);
     return ESP_OK;
 }
 

@@ -57,11 +57,12 @@ typedef struct esp_h264_set_cfg {
 esp_h264_err_t esp_h264_enc_hw_new_param(esp_h264_enc_hw_param_cfg_t *cfg, esp_h264_enc_param_hw_handle_t *out_handle);
 
 /**
- * @brief Test-only 720-class reference-frame INTERNAL A/B.
+ * @brief Switch a 720/1080 encoder from the PSRAM staging reference to the
+ *        pre-reserved INTERNAL persistent reference.
  *
- * Called after the encoder's other INTERNAL buffers/descriptors are allocated.
- * Returns true only when the already-acquired PSRAM reference was safely
- * replaced by a per-encoder INTERNAL reference.  On false, PSRAM remains in use.
+ * Called after the encoder's other INTERNAL/DMA objects are allocated.
+ * Historical function name is retained. On false the already-owned PSRAM
+ * reference remains valid.
  */
 bool esp_h264_enc_hw_ref_720_internal_abtest(esp_h264_enc_param_hw_handle_t handle);
 

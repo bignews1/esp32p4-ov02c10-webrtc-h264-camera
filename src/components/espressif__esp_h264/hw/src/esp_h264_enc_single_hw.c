@@ -24,6 +24,7 @@ typedef struct esp_h264_hw_handle {
     h264_dma_desc_t            *dsc_bs;
     uint8_t                     frame_num;
     uint8_t                     gop;
+    uint8_t                     fixed_qp;
     esp_h264_mutex_t            frame_done;
     esp_h264_intr_hd_t          intr_hd;
     bool                        small_persist_session;
@@ -37,155 +38,6 @@ typedef struct esp_h264_hw_handle {
  * only while enc_open() is active so the camera owner can update the parameter
  * GOP in place. No heap allocation is performed by this control path. */
 static volatile esp_h264_hw_handle_t *s_active_hw;
-
-
-/* [CAM-1080-LTE-QP32-GOP15-FIXED-30S-R6-20260913]
- * Diagnostic-only fixed QP32/GOP15 test for LTE ~1 Mbps.
- *
- * EVERY 1080 encoder open uses fixed QP32 / GOP15.
- * This intentionally removes the old odd/even A/B alternation so browser or
- * session reconnects cannot accidentally select GOP20.
- *
- * Measure the first 30 seconds of encoded output. There is NO mid-session
- * QP/GOP switch.
- */
-#define H264_1080_LTE_AB_WINDOW_US    (30000000LL)
-
-typedef struct {
-    bool active;
-    bool result_printed;
-    uint32_t open_index;
-    uint8_t test_qp;
-    uint8_t test_gop;
-    int64_t start_us;
-    uint32_t frames;
-    uint32_t idr_frames;
-    uint32_t p_frames;
-    uint64_t bytes_sum;
-    uint64_t idr_bytes_sum;
-    uint64_t p_bytes_sum;
-} h264_1080_lte_ab_t;
-
-static h264_1080_lte_ab_t s_h264_1080_lte_ab;
-static uint32_t s_h264_1080_lte_open_count;
-
-static bool h264_1080_lte_ab_is_target(esp_h264_hw_handle_t *hw_hd)
-{
-    if (hw_hd == NULL || hw_hd->param_hd == NULL) {
-        return false;
-    }
-
-    uint8_t mb_w = 0, mb_h = 0;
-    esp_h264_rc_hd_t rc_hd = NULL;
-    esp_h264_enc_hw_get_mbres(hw_hd->param_hd, &mb_w, &mb_h);
-    esp_h264_enc_hw_get_rc_hd(hw_hd->param_hd, &rc_hd);
-    return (mb_w == 120U && mb_h == 68U && rc_hd == NULL);
-}
-
-static void h264_1080_lte_ab_reset_runtime(void)
-{
-    memset(&s_h264_1080_lte_ab, 0, sizeof(s_h264_1080_lte_ab));
-}
-
-static void h264_1080_lte_ab_arm(esp_h264_hw_handle_t *hw_hd)
-{
-    h264_1080_lte_ab_reset_runtime();
-    if (!h264_1080_lte_ab_is_target(hw_hd)) {
-        return;
-    }
-
-    s_h264_1080_lte_open_count++;
-    s_h264_1080_lte_ab.open_index = s_h264_1080_lte_open_count;
-    s_h264_1080_lte_ab.test_qp = 32U;
-    s_h264_1080_lte_ab.test_gop = 15U;
-    s_h264_1080_lte_ab.active = true;
-
-    esp_h264_enc_hw_set_qp(hw_hd->param_hd, s_h264_1080_lte_ab.test_qp);
-    esp_h264_enc_set_gop(&hw_hd->param_hd->base, s_h264_1080_lte_ab.test_gop);
-
-    printf("[1080-LTE-GOP15-R6] ARMED open=%u profile=%s qp=%u gop=%u window=30s %s\n",
-           (unsigned)s_h264_1080_lte_ab.open_index,
-           "GOP15_FIXED",
-           (unsigned)s_h264_1080_lte_ab.test_qp,
-           (unsigned)s_h264_1080_lte_ab.test_gop,
-           "KEEP_30S");
-}
-
-static void h264_1080_lte_ab_before_frame(esp_h264_hw_handle_t *hw_hd)
-{
-    if (!s_h264_1080_lte_ab.active || !h264_1080_lte_ab_is_target(hw_hd)) {
-        return;
-    }
-
-    if (s_h264_1080_lte_ab.start_us == 0) {
-        s_h264_1080_lte_ab.start_us = esp_timer_get_time();
-        printf("[1080-LTE-GOP15-R6] START open=%u profile=%s qp=%u gop=%u\n",
-               (unsigned)s_h264_1080_lte_ab.open_index,
-               "GOP15_FIXED",
-               (unsigned)s_h264_1080_lte_ab.test_qp,
-               (unsigned)s_h264_1080_lte_ab.test_gop);
-    }
-}
-
-static bool h264_1080_lte_ab_forced_qp(esp_h264_hw_handle_t *hw_hd, uint8_t *out_qp)
-{
-    if (!s_h264_1080_lte_ab.active || out_qp == NULL ||
-        !h264_1080_lte_ab_is_target(hw_hd)) {
-        return false;
-    }
-    *out_qp = s_h264_1080_lte_ab.test_qp;
-    return true;
-}
-
-static void h264_1080_lte_ab_record(const esp_h264_enc_out_frame_t *out_frame)
-{
-    h264_1080_lte_ab_t *s = &s_h264_1080_lte_ab;
-    if (!s->active || s->result_printed || out_frame == NULL || s->start_us == 0) {
-        return;
-    }
-
-    s->frames++;
-    s->bytes_sum += out_frame->length;
-    if (out_frame->frame_type == ESP_H264_FRAME_TYPE_IDR) {
-        s->idr_frames++;
-        s->idr_bytes_sum += out_frame->length;
-    } else {
-        s->p_frames++;
-        s->p_bytes_sum += out_frame->length;
-    }
-
-    const int64_t now_us = esp_timer_get_time();
-    if ((now_us - s->start_us) < H264_1080_LTE_AB_WINDOW_US) {
-        return;
-    }
-
-    const uint64_t elapsed_us = (uint64_t)(now_us - s->start_us);
-    const uint32_t fps_x100 =
-        (uint32_t)(((uint64_t)s->frames * 100000000ULL) / elapsed_us);
-    const uint32_t kbps =
-        (uint32_t)((s->bytes_sum * 8ULL * 1000ULL) / elapsed_us);
-    const uint32_t avg_bytes = s->frames ? (uint32_t)(s->bytes_sum / s->frames) : 0U;
-    const uint32_t idr_avg =
-        s->idr_frames ? (uint32_t)(s->idr_bytes_sum / s->idr_frames) : 0U;
-    const uint32_t p_avg =
-        s->p_frames ? (uint32_t)(s->p_bytes_sum / s->p_frames) : 0U;
-
-    printf("[1080-LTE-GOP15-R6] RESULT open=%u profile=%s qp=%u gop=%u "
-           "sec=%u.%02u frames=%u fps=%u.%02u kbps=%u avg=%uB "
-           "idr=%u idr_avg=%uB p=%u p_avg=%uB\n",
-           (unsigned)s->open_index,
-           "GOP15_FIXED",
-           (unsigned)s->test_qp, (unsigned)s->test_gop,
-           (unsigned)(elapsed_us / 1000000ULL),
-           (unsigned)((elapsed_us % 1000000ULL) / 10000ULL),
-           (unsigned)s->frames,
-           (unsigned)(fps_x100 / 100U), (unsigned)(fps_x100 % 100U),
-           (unsigned)kbps, (unsigned)avg_bytes,
-           (unsigned)s->idr_frames, (unsigned)idr_avg,
-           (unsigned)s->p_frames, (unsigned)p_avg);
-
-    s->result_printed = true;
-}
 
 static void h264_gop_isr(void *arg)
 {
@@ -258,15 +110,6 @@ static esp_h264_err_t h264_hw_enc_gop_mode_process(esp_h264_hw_handle_t *hw_hd, 
     esp_h264_enc_param_hw_handle_t param_hd = hw_hd->param_hd;
     /** Get rate control(RC) handle */
     esp_h264_enc_hw_get_rc_hd(param_hd, &rc_hd);
-    if (!rc_hd) {
-        uint8_t forced_qp = 0;
-        if (h264_1080_lte_ab_forced_qp(hw_hd, &forced_qp)) {
-            uint8_t qp_init = 0;
-            esp_h264_enc_hw_get_qp_init(param_hd, &qp_init);
-            esp_h264_enc_hw_set_qp(param_hd, forced_qp);
-            qp_delta = (int8_t)forced_qp - (int8_t)qp_init;
-        }
-    }
     if (rc_hd) {
         /** RC enable. */
         uint32_t rate = 0;
@@ -280,6 +123,11 @@ static esp_h264_err_t h264_hw_enc_gop_mode_process(esp_h264_hw_handle_t *hw_hd, 
         esp_h264_enc_hw_set_rc_rate_pred(param_hd, rate, pred_mad);
         /** Slice header will record the delta QP */
         qp_delta = qp - qp_init;
+    } else if (hw_hd->fixed_qp) {
+        uint8_t qp_init = 0;
+        esp_h264_enc_hw_get_qp_init(param_hd, &qp_init);
+        esp_h264_enc_hw_set_qp(param_hd, hw_hd->fixed_qp);
+        qp_delta = (int8_t)((int)hw_hd->fixed_qp - (int)qp_init);
     }
     uint32_t *slice_start_code = (uint32_t *)out_frame;
     uint32_t slice_nal_len = 0;
@@ -368,7 +216,6 @@ static esp_h264_err_t enc_process(esp_h264_enc_handle_t enc, esp_h264_enc_in_fra
     out_frame->dts = in_frame->pts;
     out_frame->pts = in_frame->pts;
     out_frame->frame_type = ESP_H264_FRAME_TYPE_P;
-    h264_1080_lte_ab_before_frame(hw_hd);
     uint8_t gop = 0;
     esp_h264_enc_get_gop(&hw_hd->param_hd->base, &gop);
     /** Intra (I-frame) check */
@@ -394,9 +241,6 @@ static esp_h264_err_t enc_process(esp_h264_enc_handle_t enc, esp_h264_enc_in_fra
     esp_h264_mutex_lock(mutex, ESP_H264_MAX_DELAY);
     ret |= h264_hw_enc_gop_mode_process(hw_hd, in_frame->raw_data.buffer, out_frame->raw_data.buffer, out_frame->raw_data.len, &out_frame->length);
     esp_h264_mutex_unlock(mutex);
-    if (ret == ESP_H264_ERR_OK) {
-        h264_1080_lte_ab_record(out_frame);
-    }
     hw_hd->frame_num++;
     return ret;
 }
@@ -408,7 +252,6 @@ static esp_h264_err_t enc_close(esp_h264_enc_handle_t enc)
     if (s_active_hw == hw_hd) {
         s_active_hw = NULL;
     }
-    h264_1080_lte_ab_reset_runtime();
     /** Free the interrupt */
     if (hw_hd->intr_hd) {
         esp_h264_intr_free(hw_hd->intr_hd);
@@ -431,13 +274,11 @@ static esp_h264_err_t enc_open(esp_h264_enc_handle_t enc)
 {
     esp_h264_hw_handle_t *hw_hd = __containerof(enc, esp_h264_hw_handle_t, base);
     hw_hd->frame_num = 0;
-    h264_1080_lte_ab_reset_runtime();
     /** Enable H.264 interrupt */
     if (esp_h264_intr_alloc(0, h264_gop_isr, (void *)hw_hd, &hw_hd->intr_hd) == ESP_OK) {
         hw_hd->frame_done = esp_h264_mutex_create();
         h264_hal_ena_intr(&hw_hd->h264_hal, H264_INTR_DB_TMP_READY | H264_INTR_REC_READY | H264_INTR_2MB_LINE_DONE | H264_INTR_FRAME_DONE);
         s_active_hw = hw_hd;
-        h264_1080_lte_ab_arm(hw_hd);
         return ESP_H264_ERR_OK;
     }
     /** Close the encoder */
@@ -579,9 +420,9 @@ esp_h264_err_t esp_h264_enc_hw_new(const esp_h264_enc_cfg_hw_t *cfg, esp_h264_en
     }
     ESP_H264_GOTO_ON_FALSE(hw_hd->dsc_bs != NULL, ESP_H264_ERR_MEM, __exit__, TAG, "No memory for BS descriptor");
 
-    /* [REF-720-INTERNAL-ABTEST 2026-09-12]
-     * Do this only after db_tmp + all encoder-side INTERNAL descriptors exist.
-     * The helper is fail-safe: false means keep the already-owned PSRAM ref. */
+    /* Switch to the pre-reserved INTERNAL reference only after db_tmp and
+     * encoder DMA descriptors are ready. If unavailable, keep the already
+     * acquired PSRAM staging reference. Historical helper name is retained. */
     (void)esp_h264_enc_hw_ref_720_internal_abtest(hw_hd->param_hd);
 
     /** Configure de-blocking filter temporary parameter and de-blocking data, reference picture DMA*/
@@ -624,4 +465,33 @@ esp_h264_err_t esp_h264_enc_hw_active_set_gop(uint8_t gop)
     }
 
     return esp_h264_enc_set_gop(&hw_hd->param_hd->base, gop);
+}
+
+esp_h264_err_t esp_h264_enc_hw_active_set_qp(uint8_t qp)
+{
+    if (qp > 51U) {
+        return ESP_H264_ERR_ARG;
+    }
+
+    esp_h264_hw_handle_t *hw_hd = (esp_h264_hw_handle_t *)s_active_hw;
+    if (hw_hd == NULL || hw_hd->param_hd == NULL || hw_hd->intr_hd == NULL) {
+        return ESP_H264_ERR_FAIL;
+    }
+
+    return esp_h264_enc_hw_set_qp(hw_hd->param_hd, qp);
+}
+
+esp_h264_err_t esp_h264_enc_hw_active_set_fixed_qp(uint8_t qp)
+{
+    if (qp == 0U || qp > 51U) {
+        return ESP_H264_ERR_ARG;
+    }
+
+    esp_h264_hw_handle_t *hw_hd = (esp_h264_hw_handle_t *)s_active_hw;
+    if (hw_hd == NULL || hw_hd->param_hd == NULL || hw_hd->intr_hd == NULL) {
+        return ESP_H264_ERR_FAIL;
+    }
+
+    hw_hd->fixed_qp = qp;
+    return esp_h264_enc_hw_set_qp(hw_hd->param_hd, qp);
 }

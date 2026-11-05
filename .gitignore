@@ -1,0 +1,10 @@
+build/
+managed_components/
+.env
+.env.*
+*.zip
+*.bak
+*.ttf
+*.otf
+sdkconfig
+sdkconfig.old

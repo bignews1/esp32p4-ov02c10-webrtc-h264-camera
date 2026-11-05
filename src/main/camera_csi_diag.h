@@ -44,6 +44,8 @@ camera_h264_profile_t camera_h264_stream_get_profile(void);
  * While stopped it selects the GOP for the next encoder open. While running it
  * updates the already-open HW encoder in place and waits briefly for the camera
  * worker to accept the request. 720 remains fixed GOP5. */
+esp_err_t camera_h264_stream_set_1080_net_profile(uint32_t qp, uint32_t gop);
+uint32_t  camera_h264_stream_get_qp(void);
 esp_err_t camera_h264_stream_set_gop(uint32_t gop);
 uint32_t  camera_h264_stream_get_gop(void);
 const char *camera_h264_stream_profile_name(camera_h264_profile_t profile);
@@ -63,10 +65,19 @@ typedef struct {
     uint8_t               y_p10;
     uint8_t               y_p50;
     uint8_t               y_p90;
+    uint8_t               y_p95;
+    uint16_t              y_clip_low_bp;
+    uint16_t              y_clip_high_bp;
     float                 u_mean;
     float                 v_mean;
     float                 u_abs;
     float                 v_abs;
+    uint32_t              neutral_count;
+    float                 neutral_u_mean;
+    float                 neutral_v_mean;
+    float                 zone_y_mean[9];
+    float                 zone_u_mean[9];
+    float                 zone_v_mean[9];
 } camera_color_measurement_t;
 
 uint32_t camera_color_measure_request(camera_h264_profile_t profile);
@@ -90,6 +101,10 @@ typedef struct {
     uint32_t encoder_skips;
     uint32_t h264_bytes_last;
     uint32_t h264_bytes_max;
+    /* [CAM-H264-TX-RATE-DIAG-R1-20261005] Recent actual encoder output bitrate.
+     * Computed from encoded access-unit bytes over the existing FPS window.
+     * Read-only telemetry: no encoder/network policy is changed. */
+    uint32_t h264_tx_kbps;
     uint32_t encode_us_last;
     uint32_t encode_us_max;
     uint32_t camera_dq_us_last;

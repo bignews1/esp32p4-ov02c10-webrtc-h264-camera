@@ -1,5 +1,10 @@
 # ESP32-P4 OV02C10 WebRTC H.264 Camera
 
+## Snapshot update — 2026-11-05
+
+Updated camera/ISP, WebRTC, Opus capture, H.264 encoder and browser face detection, multi-face tracking and experimental OWNER code. This remains an extracted reference bundle, not a standalone build. See [scope and validation](docs/SNAPSHOT_20261105.md). No personal face data or private deployment settings are included.
+
+
 Production-oriented reference files for an ESP32-P4 camera stream using:
 
 - OV02C10 camera input
@@ -101,7 +106,7 @@ src/components/espressif__esp_h264/hw/
   src/esp_h264_enc_single_hw.c
   src/esp_h264_enc_hw_param.c
   include/esp_h264_enc_single_hw.h
-  include/esp_h264_enc_hw_param.h
+  src/esp_h264_enc_hw_param.h
 
 docs/
   QP_GOP_TUNING.md

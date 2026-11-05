@@ -1,0 +1,50 @@
+[
+  {
+    "path": "src/components/espressif__esp_h264/hw/include/esp_h264_enc_single_hw.h",
+    "sha256": "72ca40b3ce4066aa966f32f19ed22dab34a5f0fddb235b5423ea78e71c0b462a"
+  },
+  {
+    "path": "src/components/espressif__esp_h264/hw/src/esp_h264_enc_hw_param.c",
+    "sha256": "42d9f1e14fd2ac401fd0eeff09d01458d869ec7109a533dfcd80e3019aa6e740"
+  },
+  {
+    "path": "src/components/espressif__esp_h264/hw/src/esp_h264_enc_hw_param.h",
+    "sha256": "8ddb5d0c252f97002cdb1cf09dc6314f6510cd5e288d22c331faf327f1f3bc6e"
+  },
+  {
+    "path": "src/components/espressif__esp_h264/hw/src/esp_h264_enc_single_hw.c",
+    "sha256": "94cf48b9349befc58e33d993b5c4d94fd8544e769f34b435fd4c5eff8f2be3f0"
+  },
+  {
+    "path": "src/main/camera_color_stage2.c",
+    "sha256": "858550f4de750bd13d390fb70de30677a2fc4b815bd723856a23184d4ccdce55"
+  },
+  {
+    "path": "src/main/camera_color_stage2.h",
+    "sha256": "f7792d89fe53cf327ec64cf7428ba108c7fa53fe06c5686a8a5b56006e6ecc24"
+  },
+  {
+    "path": "src/main/camera_csi_diag.c",
+    "sha256": "8c5cc5169af78a94b66d34ad565da2f51310b100bd73098c25b7bde2698f82a6"
+  },
+  {
+    "path": "src/main/camera_csi_diag.h",
+    "sha256": "97523004efc109a429a045d51f93311823d8d11835258d3c8f3686a659692d58"
+  },
+  {
+    "path": "src/main/camera_live.html",
+    "sha256": "b431914b34829af061026b4f3c4c50241942b0995f0091348d41d29e4560b3eb"
+  },
+  {
+    "path": "src/main/camera_webrtc_audio.c",
+    "sha256": "302f757d3c079613d96abc952c0178523b9819b3fba8488c5fd571d20e11517c"
+  },
+  {
+    "path": "src/main/camera_webrtc_audio.h",
+    "sha256": "33e6d7d45a7f4ae1c5979fe51e9ce9624c185d1a47626bfe9e9ed3df9776743b"
+  },
+  {
+    "path": "src/main/web_smoke.c",
+    "sha256": "d25818208d121e6eb506ced42e9efaf245c292bee9431522bbc2bde1baae9750"
+  }
+]

@@ -64,6 +64,8 @@ esp_h264_err_t esp_h264_enc_hw_get_param_hd(esp_h264_enc_handle_t enc, esp_h264_
  *       - ESP_H264_ERR_FAIL  No HW encoder is currently opened
  */
 esp_h264_err_t esp_h264_enc_hw_active_set_gop(uint8_t gop);
+esp_h264_err_t esp_h264_enc_hw_active_set_qp(uint8_t qp);
+esp_h264_err_t esp_h264_enc_hw_active_set_fixed_qp(uint8_t qp);
 
 /**
  * @brief Reserve the shared PSRAM reference-frame pool for HW H.264.
