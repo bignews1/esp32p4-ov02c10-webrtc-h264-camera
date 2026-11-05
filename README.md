@@ -1,5 +1,16 @@
 # ESP32-P4 OV02C10 WebRTC H.264 Camera
 
+## Development footage
+
+[![Privacy-masked home-panel tracking demo](docs/demo/home-panel-tracking-preview.gif)](docs/demo/home-panel-tracking-demo.mp4)
+
+[Watch/download the 30-second MP4](docs/demo/home-panel-tracking-demo.mp4).
+This is a continuous excerpt from the existing home-panel development recording,
+with camera imagery heavily pixelated, browser chrome cropped and audio removed.
+Green/cyan tracking strokes are retained. It is not a recording of the standalone
+example and is not an image-quality, frame-rate or recognition-accuracy benchmark.
+[Footage and privacy notes](docs/demo/README.md).
+
 ## Start here: buildable example
 
 [OV02C10 WebRTC example](examples/ov02c10_webrtc/README.md) prepares a separate
