@@ -1,5 +1,14 @@
 # ESP32-P4 OV02C10 WebRTC H.264 Camera
 
+## Start here: buildable example
+
+[OV02C10 WebRTC example](examples/ov02c10_webrtc/README.md) prepares a separate
+ESP-IDF application from a pinned public Espressif example, with an external
+OV02C10 driver and local-only Wi-Fi/HTTPS settings. Start with that baseline,
+then use the optimized source snapshots under `src/` as integration references.
+
+한국어: [예제 안내](examples/ov02c10_webrtc/README_KO.md).
+
 ## Snapshot update — 2026-11-05
 
 Updated camera/ISP, WebRTC, Opus capture, H.264 encoder and browser face detection, multi-face tracking and experimental OWNER code. This remains an extracted reference bundle, not a standalone build. See [scope and validation](docs/SNAPSHOT_20261105.md). No personal face data or private deployment settings are included.

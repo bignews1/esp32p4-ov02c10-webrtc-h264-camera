@@ -1,0 +1,12 @@
+{
+  "components/ov02c10/CMakeLists.txt": "8a0af8a28c541822d3dc10b3847c1e6cb599fd4e5725e649d5c9b1e4c7a16a57",
+  "components/ov02c10/Kconfig": "53abd4b2ff7e5e4aec506d102d774a66ef7bec1da98361b88b392a69c7695923",
+  "components/ov02c10/cfg/ov02c10_default.json": "9f78d49ab5112e04d200c52b09db3436686be1a191776b2678ab614a098312fb",
+  "components/ov02c10/include/ov02c10.h": "b104f68e267640023640588ef15ead66bd4986696fe4a94a593bcdea79795e92",
+  "components/ov02c10/include/ov02c10_types.h": "d5a4e237f6e0d5e92a01ca211e8c73aa363425b3f5cb1516f3f362a2ac5815f4",
+  "components/ov02c10/include/ov02c10_webrtc_profile.h": "82441ad69dbbf6ea809ee1c65d15684f9bbaa9e9dd92ae91bbc5a31b56e67d2f",
+  "components/ov02c10/ov02c10.c": "45a9a02e4b6858711f120f6137e334d1dc579a218f09eb1bf4597c30effbd5e2",
+  "components/ov02c10/private_include/ov02c10_regs.h": "8491b06574963b6ecc0134b863490a8b6df495495654538d8b0f1c0eec334192",
+  "components/ov02c10/private_include/ov02c10_settings.h": "7ca6e7cea6b97e3d5e01d477a431e9166f6d12ef9011106f4041fea1218dbb2f",
+  "components/ov02c10/project_include.cmake": "685b23511fd15c2783758d20371c738a93a86b7a8c7b0e7a4069b55075f9bfa4"
+}
